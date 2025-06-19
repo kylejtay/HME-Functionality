@@ -1,0 +1,26 @@
+[10-Jun-2025 23:35:21 UTC] HME: Attempting to create task with data: {"title":"Hang Mirror or Painting Brick from 8 ft to 15 ft","related":[{"id":"mbr5sap9hb0f7d7xfab0sq"}],"date_start":0,"date_end":0}
+[10-Jun-2025 23:35:23 UTC] HME: Successfully created task "Hang Mirror or Painting Brick from 8 ft to 15 ft" with ID: mbr5sclvn8gr0201m3y0flo
+[10-Jun-2025 23:35:23 UTC] HME: Attempting to create task with data: {"title":"Disconnect Washing Machine - Gas Dryer Stacked","related":[{"id":"mbr5sap9hb0f7d7xfab0sq"}],"date_start":0,"date_end":0}
+[10-Jun-2025 23:35:24 UTC] HME: Successfully created task "Disconnect Washing Machine - Gas Dryer Stacked" with ID: mbr5sdsy4fmwv4phyjznxzh
+[10-Jun-2025 23:35:24 UTC] HME: Created 2 tasks out of 2 products
+[10-Jun-2025 23:35:24 UTC] HME: Successfully created JobNimbus records for order 2164 with job ID mbr5sap9hb0f7d7xfab0sq
+[10-Jun-2025 23:35:45 UTC] PHP Warning:  Attempt to read property "serviceId" on bool in /home/homemain/staging.homemaintexperts.com/wp-content/plugins/booknetic/app/Backend/Appointments/Helpers/TimeSlotService.php on line 178
+[10-Jun-2025 23:35:45 UTC] PHP Warning:  Attempt to read property "serviceId" on bool in /home/homemain/staging.homemaintexperts.com/wp-content/plugins/booknetic/app/Backend/Appointments/Helpers/TimeSlotService.php on line 178
+[10-Jun-2025 23:35:51 UTC] PHP Warning:  Attempt to read property "serviceId" on bool in /home/homemain/staging.homemaintexperts.com/wp-content/plugins/booknetic/app/Backend/Appointments/Helpers/TimeSlotService.php on line 178
+[10-Jun-2025 23:35:51 UTC] PHP Warning:  Attempt to read property "serviceId" on bool in /home/homemain/staging.homemaintexperts.com/wp-content/plugins/booknetic/app/Backend/Appointments/Helpers/TimeSlotService.php on line 178
+[10-Jun-2025 23:35:53 UTC] HME: Webhook received - Method: POST
+[10-Jun-2025 23:35:53 UTC] HME: Webhook Headers: {"accept_encoding":["gzip, br"],"content_type":["application\/json"],"content_length":["182"],"host":["staging.homemaintexperts.com"],"user_agent":["GuzzleHttp\/7"],"x_forwarded_for":["198.175.150.171, 198.41.227.33"],"x_forwarded_proto":["https"],"x_booknetic_secret":["Os6ttpYllAZKq64xPIi4gJj8x"],"cf_ray":["94dcb00f5ecc6fa8-DFW"],"cdn_loop":["cloudflare; loops=1"],"cf_connecting_ip":["198.175.150.171"],"cf_ipcountry":["US"],"cf_visitor":["{\"scheme\":\"https\"}"],"authorization":[""]}
+[10-Jun-2025 23:35:53 UTC] HME: Webhook Body: {"hook":"created","starts_at":"{appointment_date_start_iso}","ends_at":"{appointment_date_end_iso}","location":{"name":"Davis County"},"website_order_number":"{custom_field_woo_id}"}
+[10-Jun-2025 23:35:53 UTC] HME: Webhook GET params: []
+[10-Jun-2025 23:35:53 UTC] HME: Webhook POST params: []
+[10-Jun-2025 23:35:53 UTC] HME: Parsed JSON data: {"hook":"created","starts_at":"{appointment_date_start_iso}","ends_at":"{appointment_date_end_iso}","location":{"name":"Davis County"},"website_order_number":"{custom_field_woo_id}"}
+[11-Jun-2025 00:05:38 UTC] HME: Attempting to create task with data: {"title":"Hang Mirror or Painting Brick from 8 ft to 15 ft","related":[{"id":"mbr6v9unhn55u6plsfw5ioe"}],"date_start":0,"date_end":0}
+[11-Jun-2025 00:05:40 UTC] HME: Successfully created task "Hang Mirror or Painting Brick from 8 ft to 15 ft" with ID: mbr6vam3b4hud2hpx0cmui7
+[11-Jun-2025 00:05:40 UTC] HME: Attempting to create task with data: {"title":"Disconnect Washing Machine - Gas Dryer Stacked","related":[{"id":"mbr6v9unhn55u6plsfw5ioe"}],"date_start":0,"date_end":0}
+[11-Jun-2025 00:05:42 UTC] HME: Successfully created task "Disconnect Washing Machine - Gas Dryer Stacked" with ID: mbr6vc64f0zcf228p1ff6y
+[11-Jun-2025 00:05:42 UTC] HME: Created 2 tasks out of 2 products
+[11-Jun-2025 00:05:42 UTC] HME: Successfully created JobNimbus records for order 2165 with job ID mbr6v9unhn55u6plsfw5ioe
+[11-Jun-2025 00:06:04 UTC] PHP Warning:  Attempt to read property "serviceId" on bool in /home/homemain/staging.homemaintexperts.com/wp-content/plugins/booknetic/app/Backend/Appointments/Helpers/TimeSlotService.php on line 178
+[11-Jun-2025 00:06:04 UTC] PHP Warning:  Attempt to read property "serviceId" on bool in /home/homemain/staging.homemaintexperts.com/wp-content/plugins/booknetic/app/Backend/Appointments/Helpers/TimeSlotService.php on line 178
+[11-Jun-2025 00:06:06 UTC] PHP Warning:  Attempt to read property "serviceId" on bool in /home/homemain/staging.homemaintexperts.com/wp-content/plugins/booknetic/app/Backend/Appointments/Helpers/TimeSlotService.php on line 178
+[11-Jun-2025 00:06:06 UTC] PHP Warning:  Attempt to read property "serviceId" on bool in /home/homemain/staging.homemaintexperts.com/wp-content/plugins/booknetic/app/Backend/Appointments/Helpers/TimeSlotService.php on line 178
