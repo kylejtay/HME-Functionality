@@ -736,60 +736,205 @@ function hme_create_jobnimbus_records( $order_id ) {
 }
 
 /******************************************************************
- *  BOOKNETIC APPOINTMENT ► UPDATE JOBNIMBUS DATES
+ *  BOOKNETIC WEBHOOK ► UPDATE JOBNIMBUS DATES
  *****************************************************************/
 
-// Add AJAX endpoints for appointment handling
-add_action( 'wp_ajax_hme_appointment_scheduled', 'hme_handle_appointment_scheduled' );
-add_action( 'wp_ajax_nopriv_hme_appointment_scheduled', 'hme_handle_appointment_scheduled' );
+// Add Booknetic webhook endpoint to receive appointment data directly
+add_action( 'wp_ajax_hme_booknetic_webhook', 'hme_booknetic_webhook_handler' );
+add_action( 'wp_ajax_nopriv_hme_booknetic_webhook', 'hme_booknetic_webhook_handler' );
 
-function hme_handle_appointment_scheduled() {
-    // Verify nonce
-    if ( ! wp_verify_nonce( $_POST['nonce'], 'hme-appointment-nonce' ) ) {
-        wp_send_json_error( 'Invalid nonce' );
-    }
-
-    // Get order ID from session or URL parameter
-    $order_id = null;
+function hme_booknetic_webhook_handler() {
+    error_log( 'HME: Booknetic webhook called with data: ' . wp_json_encode( $_POST ) );
     
-    if ( ! session_id() ) {
-        session_start();
+    // Get the raw POST data (Booknetic might send JSON)
+    $raw_data = file_get_contents('php://input');
+    $json_data = json_decode($raw_data, true);
+    
+    error_log( 'HME: Raw webhook data: ' . $raw_data );
+    error_log( 'HME: Parsed JSON data: ' . wp_json_encode( $json_data ) );
+    
+    // Try to extract appointment data from either POST or JSON
+    $appointment_data = $json_data ?: $_POST;
+    
+    if ( empty( $appointment_data ) ) {
+        error_log( 'HME: No appointment data received in webhook' );
+        wp_send_json_error( 'No data received' );
     }
     
-    if ( isset( $_SESSION['hme_order_id'] ) ) {
-        $order_id = $_SESSION['hme_order_id'];
-        error_log( 'HME: Found order ID from session: ' . $order_id );
-    } elseif ( isset( $_POST['order_id'] ) ) {
-        $order_id = intval( $_POST['order_id'] );
-        error_log( 'HME: Found order ID from POST: ' . $order_id );
-    } elseif ( isset( $_GET['oid'] ) ) {
-        $order_id = intval( $_GET['oid'] );
-        error_log( 'HME: Found order ID from GET: ' . $order_id );
+    // Extract customer email
+    $customer_email = null;
+    if ( isset( $appointment_data['customer_email'] ) ) {
+        $customer_email = sanitize_email( $appointment_data['customer_email'] );
+    } elseif ( isset( $appointment_data['email'] ) ) {
+        $customer_email = sanitize_email( $appointment_data['email'] );
     }
-
-    if ( ! $order_id ) {
-        error_log( 'HME: No order ID found for appointment' );
-        wp_send_json_error( 'No order ID found' );
-    }
-
-    // Get appointment data from POST
-    $start_date = isset( $_POST['start_date'] ) ? sanitize_text_field( $_POST['start_date'] ) : '';
-    $end_date = isset( $_POST['end_date'] ) ? sanitize_text_field( $_POST['end_date'] ) : '';
-    $appointment_id = isset( $_POST['appointment_id'] ) ? intval( $_POST['appointment_id'] ) : 0;
     
-    error_log( 'HME: Processing appointment - Order: ' . $order_id . ', Start: ' . $start_date . ', End: ' . $end_date );
+    if ( ! $customer_email ) {
+        error_log( 'HME: No customer email found in webhook data' );
+        wp_send_json_error( 'No customer email found' );
+    }
+    
+    // Extract appointment ID if available
+    $appointment_id = null;
+    if ( isset( $appointment_data['appointment_id'] ) ) {
+        $appointment_id = intval( $appointment_data['appointment_id'] );
+    }
+    
+    error_log( 'HME: Processing webhook - Email: ' . $customer_email . ', Appointment ID: ' . $appointment_id );
+    
+    // Find the most recent order for this customer email that has a JobNimbus job
+    $orders = wc_get_orders( array(
+        'billing_email' => $customer_email,
+        'status' => array( 'wc-completed', 'wc-processing' ),
+        'limit' => 10, // Check multiple orders to find one with JobNimbus job
+        'orderby' => 'date',
+        'order' => 'DESC',
+        'meta_query' => array(
+            array(
+                'key' => '_hme_jobnimbus_job_id',
+                'compare' => 'EXISTS'
+            )
+        )
+    ) );
+    
+    if ( empty( $orders ) ) {
+        // Fallback: look for any recent order without the JobNimbus requirement
+        error_log( 'HME: No orders with JobNimbus jobs found, checking for any recent orders for: ' . $customer_email );
+        $orders = wc_get_orders( array(
+            'billing_email' => $customer_email,
+            'status' => array( 'wc-completed', 'wc-processing' ),
+            'limit' => 1,
+            'orderby' => 'date',
+            'order' => 'DESC'
+        ) );
+        
+        if ( empty( $orders ) ) {
+            error_log( 'HME: No recent orders found for customer email: ' . $customer_email );
+            wp_send_json_error( 'No orders found for customer' );
+        }
+    }
+    
+    $order = $orders[0];
+    $order_id = $order->get_id();
+    
+    error_log( 'HME: Using order ' . $order_id . ' for customer ' . $customer_email );
+    
+    // Extract appointment dates
+    $start_date = isset( $appointment_data['start_date'] ) ? $appointment_data['start_date'] : null;
+    $end_date = isset( $appointment_data['end_date'] ) ? $appointment_data['end_date'] : null;
+    
+    error_log( 'HME: Webhook processing - Order: ' . $order_id . ', Appointment: ' . $appointment_id . ', Start: ' . $start_date . ', End: ' . $end_date );
+    
+    // Validate dates
+    if ( ! $start_date || ! $end_date ) {
+        error_log( 'HME: Missing appointment dates in webhook' );
+        wp_send_json_error( 'Missing appointment dates' );
+    }
+    
+    // Clean up duplicated dates (e.g., "06/25/2025 12:00 PM06/25/2025 12:00 PM" -> "06/25/2025 12:00 PM")
+    $start_date = hme_clean_duplicate_date( $start_date );
+    $end_date = hme_clean_duplicate_date( $end_date );
+    
+    error_log( 'HME: Cleaned dates - Start: ' . $start_date . ', End: ' . $end_date );
+    
+    // Convert dates if needed (BookNetic format might be MM/DD/YYYY H:i A)
+    $start_timestamp = strtotime( $start_date );
+    $end_timestamp = strtotime( $end_date );
+    
+    if ( ! $start_timestamp || ! $end_timestamp ) {
+        error_log( 'HME: Invalid appointment date format - Start: ' . $start_date . ', End: ' . $end_date );
+        wp_send_json_error( 'Invalid appointment date format' );
+    }
+    
+    // Fix timezone issue for Mountain Time Zone
+    // JobNimbus treats timestamps as UTC, but we need Mountain Time
+    // Automatically detect Daylight Saving Time vs Standard Time
+    
+    // Create a DateTime object for the appointment date in Mountain Time
+    $appointment_datetime = new DateTime( $start_date, new DateTimeZone('America/Denver') );
+    $is_dst = $appointment_datetime->format('I'); // 1 if DST, 0 if standard time
+    
+    if ( $is_dst ) {
+        // Mountain Daylight Time (MDT) = UTC-6, so add 6 hours
+        $mountain_time_offset = 6 * 3600;
+        $timezone_name = 'MDT (UTC-6)';
+    } else {
+        // Mountain Standard Time (MST) = UTC-7, so add 7 hours  
+        $mountain_time_offset = 7 * 3600;
+        $timezone_name = 'MST (UTC-7)';
+    }
+    
+    $start_timestamp += $mountain_time_offset;
+    $end_timestamp += $mountain_time_offset;
+    
+    error_log( 'HME: Adjusted timestamps for Mountain Time (' . $timezone_name . ') - Start: ' . date('Y-m-d H:i:s T', $start_timestamp) . ', End: ' . date('Y-m-d H:i:s T', $end_timestamp) );
+    
+    // Convert to standard format
+    $start_date_formatted = date( 'Y-m-d H:i:s', $start_timestamp );
+    $end_date_formatted = date( 'Y-m-d H:i:s', $end_timestamp );
+    
+    // Update JobNimbus
+    $result = hme_update_jobnimbus_appointment_dates( $order_id, $start_date_formatted, $end_date_formatted, $appointment_id );
+    
+    if ( $result ) {
+        error_log( 'HME: Successfully processed webhook for order ' . $order_id );
+        wp_send_json_success( [ 'message' => 'Appointment processed successfully' ] );
+    } else {
+        error_log( 'HME: Failed to process webhook for order ' . $order_id );
+        wp_send_json_error( 'Failed to process appointment' );
+    }
+}
 
-    // Get the order and JobNimbus job ID
+// Helper function to clean up duplicated date strings from BookNetic
+function hme_clean_duplicate_date( $date_string ) {
+    if ( empty( $date_string ) ) {
+        return $date_string;
+    }
+    
+    // Remove any extra whitespace
+    $date_string = trim( $date_string );
+    
+    // Pattern to match date formats like: MM/DD/YYYY H:i A
+    $date_pattern = '/(\d{1,2}\/\d{1,2}\/\d{4}\s+\d{1,2}:\d{2}\s+[AP]M)/i';
+    
+    // Find all date matches in the string
+    preg_match_all( $date_pattern, $date_string, $matches );
+    
+    if ( ! empty( $matches[1] ) ) {
+        // Return the first valid date match
+        return trim( $matches[1][0] );
+    }
+    
+    // If no pattern match, try to detect if it's a simple duplication
+    // e.g., "06/25/2025 12:00 PM06/25/2025 12:00 PM"
+    $length = strlen( $date_string );
+    if ( $length > 20 && $length % 2 === 0 ) {
+        $half_length = $length / 2;
+        $first_half = substr( $date_string, 0, $half_length );
+        $second_half = substr( $date_string, $half_length );
+        
+        // If both halves are identical, return just one
+        if ( $first_half === $second_half ) {
+            return trim( $first_half );
+        }
+    }
+    
+    // Return original if no cleaning needed
+    return $date_string;
+}
+
+// Function to update JobNimbus with appointment dates
+function hme_update_jobnimbus_appointment_dates( $order_id, $start_date, $end_date, $appointment_id = null ) {
     $order = wc_get_order( $order_id );
     if ( ! $order ) {
         error_log( 'HME: Order not found: ' . $order_id );
-        wp_send_json_error( 'Order not found' );
+        return false;
     }
 
     $job_id = $order->get_meta( '_hme_jobnimbus_job_id' );
     if ( ! $job_id ) {
         error_log( 'HME: JobNimbus job ID not found for order: ' . $order_id );
-        wp_send_json_error( 'JobNimbus job ID not found' );
+        return false;
     }
 
     // Convert dates to timestamps
@@ -798,8 +943,10 @@ function hme_handle_appointment_scheduled() {
 
     if ( ! $date_start || ! $date_end ) {
         error_log( 'HME: Invalid date format - Start: ' . $start_date . ', End: ' . $end_date );
-        wp_send_json_error( 'Invalid date format' );
+        return false;
     }
+
+    error_log( 'HME: Updating JobNimbus job ' . $job_id . ' with dates: ' . $date_start . ' to ' . $date_end );
 
     // Update job dates and status
     $job_result = hme_jn( "jobs/$job_id", 'PUT', [ 
@@ -810,17 +957,22 @@ function hme_handle_appointment_scheduled() {
 
     if ( ! $job_result ) {
         error_log( 'HME: Failed to update JobNimbus job: ' . $job_id );
-        wp_send_json_error( 'Failed to update job' );
+        return false;
     }
+
+    error_log( 'HME: Successfully updated job. Result: ' . wp_json_encode( $job_result ) );
 
     // Update all related tasks with the same dates
     $tasks = hme_jn( "tasks?filter=" . rawurlencode( wp_json_encode( [
         'must' => [ [ 'term' => [ 'related.id' => $job_id ] ] ]
     ] ) ) );
 
+    error_log( 'HME: Found tasks for job ' . $job_id . ': ' . wp_json_encode( $tasks ) );
+
     $updated_tasks = 0;
     if ( ! empty( $tasks['results'] ) ) {
         foreach ( $tasks['results'] as $task ) {
+            error_log( 'HME: Updating task ' . $task['jnid'] . ' with dates' );
             $task_result = hme_jn( "tasks/{$task['jnid']}", 'PUT', [
                 'date_start' => $date_start,
                 'date_end' => $date_end
@@ -828,6 +980,9 @@ function hme_handle_appointment_scheduled() {
             
             if ( $task_result ) {
                 $updated_tasks++;
+                error_log( 'HME: Successfully updated task ' . $task['jnid'] );
+            } else {
+                error_log( 'HME: Failed to update task ' . $task['jnid'] );
             }
         }
     }
@@ -840,230 +995,442 @@ function hme_handle_appointment_scheduled() {
 
     error_log( 'HME: Successfully updated JobNimbus - Job: ' . $job_id . ', Tasks: ' . $updated_tasks );
     
-    wp_send_json_success( [
-        'message' => 'Appointment scheduled successfully',
-        'job_id' => $job_id,
-        'tasks_updated' => $updated_tasks
-    ] );
+    return true;
 }
 
-// Add JavaScript to monitor Booknetic appointment creation
-add_action( 'wp_footer', 'hme_booknetic_appointment_monitor' );
-function hme_booknetic_appointment_monitor() {
+// Keep a simple JavaScript-based fallback for direct database queries
+add_action( 'wp_footer', 'hme_booknetic_database_monitor' );
+function hme_booknetic_database_monitor() {
     // Only run on the Booknetic scheduling page
     if ( ! is_page() || ! has_shortcode( get_post()->post_content, 'hme_booknetic' ) ) {
         return;
     }
     
     $order_id = isset( $_GET['oid'] ) ? intval( $_GET['oid'] ) : 0;
+    
+    // Get current user data for auto-population
+    $current_user = wp_get_current_user();
+    $user_data = array();
+    
+    if ( $current_user->ID ) {
+        $user_data = array(
+            'email' => $current_user->user_email,
+            'first_name' => $current_user->first_name,
+            'last_name' => $current_user->last_name,
+            'phone' => get_user_meta( $current_user->ID, 'billing_phone', true ),
+            'display_name' => $current_user->display_name
+        );
+        
+        // If no first/last name, try to split display name
+        if ( empty( $user_data['first_name'] ) && ! empty( $user_data['display_name'] ) ) {
+            $name_parts = explode( ' ', $user_data['display_name'], 2 );
+            $user_data['first_name'] = $name_parts[0];
+            $user_data['last_name'] = isset( $name_parts[1] ) ? $name_parts[1] : '';
+        }
+    }
     ?>
     <script type="text/javascript">
     jQuery(function($) {
-        console.log('HME: Appointment monitor started for order <?php echo $order_id; ?>');
+        console.log('HME: Database monitor started for order <?php echo $order_id; ?>');
         
-        var appointmentProcessed = false;
-        var initialPageState = $('body').html(); // Capture initial state
+        // Auto-populate user data if logged in
+        <?php if ( ! empty( $user_data['email'] ) ): ?>
+        var userData = <?php echo wp_json_encode( $user_data ); ?>;
+        console.log('HME: Auto-populating user data:', userData);
         
-        // Monitor for actual changes/completions rather than existing elements
-        function checkBookneticSuccess() {
-            if (appointmentProcessed) return;
+        function populateBookneticForm() {
+            // Check if we're on the Information step (step 3) and form fields are visible
+            var isInformationStep = false;
+            var hasFormFields = false;
             
-            // Check if we're on step 4 (Confirmation) and there's been a change
-            var currentStep = $('.booknetic-step-4, [data-step="4"], .step-4').length > 0;
-            var confirmationStep = $('.booknetic-confirmation-step, .confirmation-step').length > 0;
-            
-            // Look for NEW success/confirmation elements (not present on initial load)
-            var currentPageState = $('body').html();
-            var pageHasChanged = currentPageState !== initialPageState;
-            
-            // More specific success indicators that appear after booking
-            var appointmentSuccessElements = $(
-                '.booknetic-appointment-success, ' +
-                '.booknetic-booking-confirmed, ' +
-                '.appointment-confirmed-message, ' +
-                '.booking-success-message, ' +
-                '[data-status="confirmed"], ' +
-                '[data-booking-confirmed="true"]'
-            );
-            
-            // Check for confirmation buttons/text that appear after successful booking
-            var confirmationText = $('body').text();
-            var hasConfirmationText = confirmationText.includes('Your appointment has been') || 
-                                    confirmationText.includes('Appointment confirmed') ||
-                                    confirmationText.includes('Successfully booked') ||
-                                    confirmationText.includes('Thank you for booking');
-            
-            // Only trigger if we detect actual success indicators AND page has changed
-            if (appointmentSuccessElements.length > 0 || (hasConfirmationText && pageHasChanged)) {
-                console.log('HME: Appointment completion detected!');
-                console.log('HME: Success elements:', appointmentSuccessElements.length, 'Text confirmed:', hasConfirmationText, 'Page changed:', pageHasChanged);
-                handleAppointmentSuccess();
-                return;
+            // Check for step 3 indicators
+            if ( $('.bkntc-step-3').length > 0 && $('.bkntc-step-3').is(':visible') ) {
+                isInformationStep = true;
+            } else if ( $('[data-step-id="information"]').length > 0 && $('[data-step-id="information"]').is(':visible') ) {
+                isInformationStep = true;
+            } else if ( $('.bkntc-step.active').length > 0 && $('.bkntc-step.active').text().toLowerCase().includes('information') ) {
+                isInformationStep = true;
             }
             
-            // Alternative: Check if we're on the final step and dates are now visible
-            if ((currentStep || confirmationStep) && pageHasChanged) {
-                var dateElements = $('input[type="hidden"]').filter(function() {
-                    return $(this).val().match(/\d{4}-\d{2}-\d{2}/) && $(this).val().match(/\d{2}:\d{2}/);
-                });
-                
-                if (dateElements.length > 0) {
-                    console.log('HME: Found appointment dates in final step');
-                    handleAppointmentSuccess();
-                    return;
-                }
-            }
-        }
-        
-        function handleAppointmentSuccess() {
-            if (appointmentProcessed) return;
-            appointmentProcessed = true;
+            // Check if form fields actually exist and are visible
+            var emailExists = false;
+            var nameExists = false;
             
-            console.log('HME: Booknetic appointment detected - processing...');
-            
-            // Try to extract appointment data from the page
-            var startDate = extractAppointmentDate('start');
-            var endDate = extractAppointmentDate('end');
-            var appointmentId = extractAppointmentId();
-            
-            console.log('HME: Extracted data - Start:', startDate, 'End:', endDate, 'ID:', appointmentId);
-            
-            if (startDate && endDate) {
-                console.log('HME: Sending to backend...');
-                $.post('<?php echo admin_url('admin-ajax.php'); ?>', {
-                    action: 'hme_appointment_scheduled',
-                    order_id: <?php echo $order_id; ?>,
-                    start_date: startDate,
-                    end_date: endDate,
-                    appointment_id: appointmentId,
-                    nonce: '<?php echo wp_create_nonce('hme-appointment-nonce'); ?>'
-                }, function(response) {
-                    if (response.success) {
-                        console.log('HME: JobNimbus updated successfully', response.data);
-                    } else {
-                        console.log('HME: Error updating JobNimbus', response.data);
-                    }
-                }).fail(function(xhr, status, error) {
-                    console.log('HME: AJAX failed', status, error);
-                });
+            // Check for email fields without case-insensitive flag
+            if ($('input[type="email"]:visible, input[name="email"]:visible').length > 0) {
+                emailExists = true;
             } else {
-                console.log('HME: Could not extract appointment dates');
-                
-                // Debug: Show what's on the page
-                console.log('HME: Page HTML contains:');
-                var relevantInputs = $('input[type="hidden"], input[type="text"], input[type="datetime-local"]').filter(function() {
-                    var name = $(this).attr('name') || '';
-                    var value = $(this).val() || '';
-                    return name.toLowerCase().includes('date') || name.toLowerCase().includes('time') || 
-                           value.match(/\d{4}-\d{2}-\d{2}/) || value.match(/\d{2}:\d{2}/);
-                });
-                relevantInputs.each(function() {
-                    console.log('HME: Input found - Name:', $(this).attr('name'), 'Value:', $(this).val());
-                });
-            }
-        }
-        
-        function extractAppointmentDate(type) {
-            // Try different ways to extract appointment dates from Booknetic
-            var date = null;
-            
-            // Method 1: Look for data attributes
-            $('[data-appointment-' + type + '], [data-' + type + '-date], [data-' + type + ']').each(function() {
-                date = $(this).data('appointment-' + type) || $(this).data(type + '-date') || $(this).data(type);
-            });
-            
-            // Method 2: Look for various input patterns
-            if (!date) {
-                var inputs = $('input[name*="' + type + '"], input[name*="date"], input[name*="time"]');
-                inputs.each(function() {
-                    var val = $(this).val();
-                    if (val && (val.match(/\d{4}-\d{2}-\d{2}/) || val.match(/\d{2}:\d{2}/))) {
-                        if (type === 'start' && !date) date = val;
-                        if (type === 'end' && date && val !== date) date = val; // Different from start
+                // Manually check for email placeholders (case-insensitive)
+                $('input:visible').each(function() {
+                    var placeholder = $(this).attr('placeholder') || '';
+                    if (placeholder.toLowerCase().indexOf('email') !== -1) {
+                        emailExists = true;
+                        return false; // break
                     }
                 });
             }
             
-            // Method 3: Look in confirmation/summary text
-            if (!date) {
-                var confirmText = $('body').text();
-                var patterns = [
-                    /(\d{4}-\d{2}-\d{2}[T\s]\d{2}:\d{2}:?\d{0,2})/g,
-                    /(\d{1,2}\/\d{1,2}\/\d{4}\s+\d{1,2}:\d{2})/g,
-                    /(\d{2}-\d{2}-\d{4}\s+\d{1,2}:\d{2})/g
+            // Check for name fields without case-insensitive flag
+            if ($('input[name="name"]:visible').length > 0) {
+                nameExists = true;
+            } else {
+                // Manually check for name placeholders (case-insensitive)
+                $('input:visible').each(function() {
+                    var placeholder = $(this).attr('placeholder') || '';
+                    if (placeholder.toLowerCase().indexOf('name') !== -1) {
+                        nameExists = true;
+                        return false; // break
+                    }
+                });
+            }
+            
+            if ( emailExists || nameExists ) {
+                hasFormFields = true;
+            }
+            
+            console.log('HME: Step check - Information step:', isInformationStep, 'Form fields exist:', hasFormFields);
+            
+            if ( isInformationStep && hasFormFields ) {
+                console.log('HME: Information step detected with form fields, attempting auto-population');
+                
+                // Try different possible selectors for email field
+                var emailSelectors = [
+                    'input[name="email"]:visible',
+                    'input[type="email"]:visible',
+                    'input[placeholder*="Email"]:visible',
+                    '#email:visible',
+                    '.email-field input:visible',
+                    '[data-field="email"] input:visible'
                 ];
                 
-                patterns.forEach(function(pattern) {
-                    if (!date) {
-                        var matches = confirmText.match(pattern);
-                        if (matches && matches.length > 0) {
-                            date = matches[0];
-                            if (type === 'end' && matches.length > 1) {
-                                date = matches[1]; // Assume second match is end time
-                            }
-                        }
+                emailSelectors.forEach(function(selector) {
+                    var $email = $(selector);
+                    if ( $email.length && !$email.val() ) {
+                        $email.val(userData.email).trigger('change').trigger('input');
+                        console.log('HME: Populated email field using selector:', selector);
                     }
                 });
-            }
-            
-            // Method 4: Fallback - create end date from start date (add 1 hour)
-            if (!date && type === 'end') {
-                var startDate = extractAppointmentDate('start');
-                if (startDate) {
-                    var start = new Date(startDate);
-                    start.setHours(start.getHours() + 1);
-                    date = start.toISOString().slice(0, 19);
+                
+                // Additional check for email fields with case-insensitive placeholder matching
+                $('input:visible').each(function() {
+                    var $input = $(this);
+                    var placeholder = $input.attr('placeholder') || '';
+                    if (!$input.val() && placeholder.toLowerCase().indexOf('email') !== -1) {
+                        $input.val(userData.email).trigger('change').trigger('input');
+                        console.log('HME: Populated email field with placeholder:', placeholder);
+                    }
+                });
+                
+                // Try different possible selectors for name fields
+                var nameSelectors = [
+                    'input[name="name"]:visible',
+                    'input[name="first_name"]:visible',
+                    'input[name="firstname"]:visible',
+                    'input[placeholder*="Name"]:visible',
+                    '#name:visible',
+                    '#first_name:visible',
+                    '.name-field input:visible',
+                    '[data-field="name"] input:visible'
+                ];
+                
+                nameSelectors.forEach(function(selector) {
+                    var $name = $(selector);
+                    if ( $name.length && !$name.val() ) {
+                        $name.val(userData.first_name).trigger('change').trigger('input');
+                        console.log('HME: Populated name field using selector:', selector, 'with value:', userData.first_name);
+                    }
+                });
+                
+                // Additional check for name fields with case-insensitive placeholder matching
+                $('input:visible').each(function() {
+                    var $input = $(this);
+                    var placeholder = $input.attr('placeholder') || '';
+                    if (!$input.val() && (placeholder.toLowerCase().indexOf('name') !== -1 || placeholder.toLowerCase().indexOf('first') !== -1)) {
+                        $input.val(userData.first_name).trigger('change').trigger('input');
+                        console.log('HME: Populated name field with placeholder:', placeholder);
+                    }
+                });
+                
+                // Try different possible selectors for surname/last name fields
+                var surnameSelectors = [
+                    'input[name="surname"]:visible',
+                    'input[name="last_name"]:visible',
+                    'input[name="lastname"]:visible',
+                    'input[placeholder*="Surname"]:visible',
+                    'input[placeholder*="Last Name"]:visible',
+                    '#surname:visible',
+                    '#last_name:visible',
+                    '.surname-field input:visible',
+                    '[data-field="surname"] input:visible'
+                ];
+                
+                surnameSelectors.forEach(function(selector) {
+                    var $surname = $(selector);
+                    if ( $surname.length && !$surname.val() ) {
+                        $surname.val(userData.last_name).trigger('change').trigger('input');
+                        console.log('HME: Populated surname field using selector:', selector, 'with value:', userData.last_name);
+                    }
+                });
+                
+                // Additional check for surname fields with case-insensitive placeholder matching
+                $('input:visible').each(function() {
+                    var $input = $(this);
+                    var placeholder = $input.attr('placeholder') || '';
+                    if (!$input.val() && (placeholder.toLowerCase().indexOf('surname') !== -1 || placeholder.toLowerCase().indexOf('last') !== -1)) {
+                        $input.val(userData.last_name).trigger('change').trigger('input');
+                        console.log('HME: Populated surname field with placeholder:', placeholder);
+                    }
+                });
+                
+                // Try different possible selectors for phone fields
+                if ( userData.phone ) {
+                    var phoneSelectors = [
+                        'input[name="phone"]:visible',
+                        'input[type="tel"]:visible',
+                        'input[placeholder*="Phone"]:visible',
+                        '#phone:visible',
+                        '.phone-field input:visible',
+                        '[data-field="phone"] input:visible'
+                    ];
+                    
+                    phoneSelectors.forEach(function(selector) {
+                        var $phone = $(selector);
+                        if ( $phone.length && !$phone.val() ) {
+                            $phone.val(userData.phone).trigger('change').trigger('input');
+                            console.log('HME: Populated phone field using selector:', selector, 'with value:', userData.phone);
+                        }
+                    });
+                    
+                    // Additional check for phone fields with case-insensitive placeholder matching
+                    $('input:visible').each(function() {
+                        var $input = $(this);
+                        var placeholder = $input.attr('placeholder') || '';
+                        if (!$input.val() && placeholder.toLowerCase().indexOf('phone') !== -1) {
+                            $input.val(userData.phone).trigger('change').trigger('input');
+                            console.log('HME: Populated phone field with placeholder:', placeholder);
+                        }
+                    });
                 }
+                
+                return true; // Form found and populated
             }
+            return false; // Not on information step yet or form not ready
+        }
+        
+        // Set up a MutationObserver to watch for step changes
+        var observer = new MutationObserver(function(mutations) {
+            mutations.forEach(function(mutation) {
+                if (mutation.type === 'childList' || mutation.type === 'attributes') {
+                    // Check if we've moved to the information step
+                    populateBookneticForm();
+                }
+            });
+        });
+        
+        // Start observing the document for changes
+        observer.observe(document.body, {
+            childList: true,
+            subtree: true,
+            attributes: true,
+            attributeFilter: ['class', 'style']
+        });
+        
+        // Also try periodically in case the observer misses something
+        var checkInterval = setInterval(function() {
+            if ( populateBookneticForm() ) {
+                clearInterval(checkInterval);
+                console.log('HME: Auto-population successful, stopping periodic checks');
+            }
+        }, 1000);
+        <?php endif; ?>
+        
+        var appointmentProcessed = false;
+        var checkCount = 0;
+        
+        function checkForNewAppointment() {
+            if (appointmentProcessed || checkCount > 24) return; // Stop after 2 minutes (24 * 5 seconds)
             
-            console.log('HME: Extracted ' + type + ' date:', date);
-            return date;
+            checkCount++;
+            console.log('HME: Database check #' + checkCount);
+            
+            $.post('<?php echo admin_url('admin-ajax.php'); ?>', {
+                action: 'hme_check_recent_appointments',
+                order_id: <?php echo $order_id; ?>,
+                nonce: '<?php echo wp_create_nonce('hme-appointment-nonce'); ?>'
+            }, function(response) {
+                if (response.success && response.data.appointment_found) {
+                    appointmentProcessed = true;
+                    console.log('HME: New appointment found in database!', response.data);
+                    
+                    // Show success message
+                    $('body').append('<div class="hme-success-notice" style="position:fixed;top:20px;right:20px;background:#4CAF50;color:white;padding:15px;border-radius:5px;z-index:9999;">Appointment scheduled successfully!</div>');
+                    setTimeout(function() { $('.hme-success-notice').fadeOut(); }, 3000);
+                }
+            });
         }
         
-        function extractAppointmentId() {
-            // Try to find appointment ID
-            var id = $('[data-appointment-id]').data('appointment-id');
-            if (!id) {
-                id = $('input[name*="appointment_id"]').val();
+        // Check every 5 seconds for new appointments
+        var checkInterval = setInterval(function() {
+            if (appointmentProcessed) {
+                clearInterval(checkInterval);
+                return;
             }
-            return id || Math.floor(Date.now() / 1000); // Fallback to timestamp
-        }
+            checkForNewAppointment();
+        }, 5000);
         
-        // Monitor for form submissions (Booknetic likely uses forms)
-        $(document).on('submit', 'form', function() {
-            console.log('HME: Form submitted, checking for appointment completion in 3 seconds...');
-            setTimeout(checkBookneticSuccess, 3000);
-        });
-        
-        // Monitor for button clicks that might complete booking
-        $(document).on('click', 'button, input[type="submit"], .btn, .button', function() {
-            var buttonText = $(this).text().toLowerCase();
-            if (buttonText.includes('confirm') || buttonText.includes('book') || buttonText.includes('finish') || buttonText.includes('complete')) {
-                console.log('HME: Booking-related button clicked:', buttonText);
-                setTimeout(checkBookneticSuccess, 2000);
-            }
-        });
-        
-        // Monitor for AJAX completion
-        $(document).ajaxComplete(function(event, xhr, settings) {
-            console.log('HME: AJAX completed, checking for appointment completion...');
-            setTimeout(checkBookneticSuccess, 1500);
-        });
-        
-        // Monitor for URL hash changes (some booking systems use hash routing)
-        $(window).on('hashchange', function() {
-            console.log('HME: URL hash changed, checking for completion...');
-            setTimeout(checkBookneticSuccess, 1000);
-        });
-        
-        // Initial check (but won't trigger due to page state comparison)
-        setTimeout(checkBookneticSuccess, 2000);
-        
-        // Periodic check with reduced frequency
-        setInterval(checkBookneticSuccess, 5000);
+        // Initial check after 3 seconds
+        setTimeout(checkForNewAppointment, 3000);
     });
     </script>
     <?php
+}
+
+// Add a new AJAX handler to check for recent appointments
+add_action( 'wp_ajax_hme_check_recent_appointments', 'hme_check_recent_appointments' );
+add_action( 'wp_ajax_nopriv_hme_check_recent_appointments', 'hme_check_recent_appointments' );
+function hme_check_recent_appointments() {
+    if ( ! wp_verify_nonce( $_POST['nonce'], 'hme-appointment-nonce' ) ) {
+        wp_send_json_error( 'Invalid nonce' );
+    }
+    
+    $order_id = intval( $_POST['order_id'] );
+    
+    // Get the order to find customer email
+    $order = wc_get_order( $order_id );
+    if ( ! $order ) {
+        wp_send_json_error( 'Order not found' );
+    }
+    
+    $customer_email = $order->get_billing_email();
+    
+    global $wpdb;
+    
+    // Check multiple possible table structures
+    $table_names = [
+        $wpdb->prefix . 'booknetic_appointments',
+        $wpdb->prefix . 'bkntc_appointments', 
+        $wpdb->prefix . 'appointments'
+    ];
+    
+    $appointment_found = false;
+    $appointments = [];
+    
+    foreach ( $table_names as $table_name ) {
+        // Check if table exists
+        $table_exists = $wpdb->get_var( $wpdb->prepare( "SHOW TABLES LIKE %s", $table_name ) );
+        
+        if ( $table_exists ) {
+            error_log( 'HME: Found Booknetic table: ' . $table_name );
+            
+            // Try to find appointments by customer email
+            $recent_appointments = $wpdb->get_results( $wpdb->prepare(
+                "SELECT * FROM {$table_name} 
+                 WHERE email = %s 
+                    AND (created_date > DATE_SUB(NOW(), INTERVAL 10 MINUTE) 
+                         OR date > DATE_SUB(NOW(), INTERVAL 1 DAY))
+                 ORDER BY id DESC LIMIT 5",
+                $customer_email
+            ) );
+            
+            // If no email column, try other approaches
+            if ( empty( $recent_appointments ) ) {
+                            // Try to find recent appointments and match them later
+            // First check if created_date column exists
+            $columns = $wpdb->get_results( "SHOW COLUMNS FROM {$table_name}" );
+            $has_created_date = false;
+            foreach ( $columns as $column ) {
+                if ( $column->Field === 'created_date' ) {
+                    $has_created_date = true;
+                    break;
+                }
+            }
+            
+            if ( $has_created_date ) {
+                $recent_appointments = $wpdb->get_results( $wpdb->prepare(
+                    "SELECT * FROM {$table_name} 
+                     WHERE (created_date > DATE_SUB(NOW(), INTERVAL 10 MINUTE) 
+                            OR date > DATE_SUB(NOW(), INTERVAL 1 DAY))
+                     ORDER BY id DESC LIMIT %d",
+                    10
+                ) );
+            } else {
+                // Fallback to just checking date field
+                $recent_appointments = $wpdb->get_results( $wpdb->prepare(
+                    "SELECT * FROM {$table_name} 
+                     WHERE date > DATE_SUB(NOW(), INTERVAL 1 DAY)
+                     ORDER BY id DESC LIMIT %d",
+                    10
+                ) );
+            }
+            }
+            
+            error_log( 'HME: Found ' . count( $recent_appointments ) . ' recent appointments in ' . $table_name );
+            
+            if ( ! empty( $recent_appointments ) ) {
+                $appointment_found = true;
+                $appointments = array_merge( $appointments, $recent_appointments );
+                
+                // Try to process the most recent appointment
+                $latest_appointment = $recent_appointments[0];
+                
+                // Extract date and time info
+                $start_date = null;
+                $end_date = null;
+                
+                // Check various date fields
+                if ( isset( $latest_appointment->date ) && isset( $latest_appointment->start_time ) ) {
+                    $start_date = $latest_appointment->date . ' ' . $latest_appointment->start_time;
+                } elseif ( isset( $latest_appointment->start_date_time ) ) {
+                    $start_date = $latest_appointment->start_date_time;
+                } elseif ( isset( $latest_appointment->datetime ) ) {
+                    $start_date = $latest_appointment->datetime;
+                }
+                
+                // Calculate end date
+                if ( $start_date ) {
+                    if ( isset( $latest_appointment->end_time ) ) {
+                        $end_date = $latest_appointment->date . ' ' . $latest_appointment->end_time;
+                    } elseif ( isset( $latest_appointment->end_date_time ) ) {
+                        $end_date = $latest_appointment->end_date_time;
+                    } else {
+                        // Default: add 1 hour to start time
+                        $end_date = date( 'Y-m-d H:i:s', strtotime( $start_date ) + 3600 );
+                    }
+                    
+                    error_log( 'HME: Found appointment dates - Start: ' . $start_date . ', End: ' . $end_date );
+                    
+                    // Update JobNimbus directly
+                    $update_result = hme_update_jobnimbus_appointment_dates( 
+                        $order_id, 
+                        $start_date, 
+                        $end_date, 
+                        $latest_appointment->id ?? null 
+                    );
+                    
+                    if ( $update_result ) {
+                        error_log( 'HME: Successfully updated JobNimbus from database check' );
+                    }
+                }
+                
+                break; // Found appointments, no need to check other tables
+            }
+        }
+    }
+    
+    // If no specific table found, show table structure for debugging
+    if ( ! $appointment_found ) {
+        $booknetic_tables = $wpdb->get_results( "SHOW TABLES LIKE '%booknetic%'" );
+        $bkntc_tables = $wpdb->get_results( "SHOW TABLES LIKE '%bkntc%'" );
+        $all_tables = array_merge( $booknetic_tables, $bkntc_tables );
+        error_log( 'HME: Available Booknetic-related tables: ' . wp_json_encode( $all_tables ) );
+    }
+    
+    wp_send_json_success( [
+        'appointment_found' => $appointment_found,
+        'appointments' => $appointments,
+        'order_id' => $order_id,
+        'customer_email' => $customer_email
+    ] );
 }
 
 /* ──────────────────  helper: search or create  ───────────────────── */
@@ -1123,7 +1490,7 @@ function hme_jn( $endpoint, $method = 'GET', $body = null ) {
 }
 
 /******************************************************************
- *  AFTER PAYMENT ► SEND CUSTOMER TO BOOKNETIC
+ *  AFTER PAYMENT ► SEND CUSTOMER TO BOOKNETIC WITH AUTO-LOGIN
  *****************************************************************/
 add_action( 'woocommerce_thankyou', 'hme_redirect_to_schedule_page', 5, 1 );
 
@@ -1133,6 +1500,26 @@ function hme_redirect_to_schedule_page( $order_id ) {
 
     $order = wc_get_order( $order_id );
     if ( ! $order || $order->has_status( 'failed' ) ) return;
+
+    // Get customer information
+    $customer_id = $order->get_customer_id();
+    $customer_email = $order->get_billing_email();
+
+    // Ensure customer is logged in to WordPress for Booknetic auto-population
+    if ( ! is_user_logged_in() && $customer_id ) {
+        // Log in the customer automatically
+        wp_set_current_user( $customer_id );
+        wp_set_auth_cookie( $customer_id );
+        error_log( 'HME: Auto-logged in customer ' . $customer_id . ' for Booknetic integration' );
+    } elseif ( ! is_user_logged_in() && $customer_email ) {
+        // Try to find user by email if no customer_id
+        $user = get_user_by( 'email', $customer_email );
+        if ( $user ) {
+            wp_set_current_user( $user->ID );
+            wp_set_auth_cookie( $user->ID );
+            error_log( 'HME: Auto-logged in user by email ' . $customer_email . ' for Booknetic integration' );
+        }
+    }
 
     /* price → minutes */
     $rate = 75;                                 // $ / hour
