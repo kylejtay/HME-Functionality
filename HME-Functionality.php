@@ -1597,3 +1597,89 @@ add_shortcode( 'hme_booknetic', function ( $atts ) {
 	// Parse & return it so Booknetic runs
 	return do_shortcode( $booknetic );
 } );
+
+// Adjust Product Filter
+
+add_filter( 'woocommerce_price_filter_widget_min_amount', function() {
+    return 0;
+});
+
+add_filter( 'woocommerce_price_filter_widget_max_amount', function() {
+    $max_credits = 25;
+    return $max_credits * ( defined('FC_CREDIT_RATE') ? FC_CREDIT_RATE : 10 );
+});
+
+add_action( 'wp_footer', 'hme_fix_price_slider_display_to_show_credits', 100 );
+function hme_fix_price_slider_display_to_show_credits() {
+    if ( ! is_shop() && ! is_product_category() ) return;
+
+    $rate = defined('FC_CREDIT_RATE') ? FC_CREDIT_RATE : 10;
+    ?>
+    <script type="text/javascript">
+      jQuery(function($) {
+        const rate = <?php echo $rate; ?>;
+
+        function usdToCredits(usd) {
+            return Math.round(usd / rate);
+        }
+
+        function updateSliderLabel() {
+            const $minInput = $('input#min_price');
+            const $maxInput = $('input#max_price');
+            const $label = $('.price_slider_amount .price_label');
+
+            if (!$minInput.length || !$maxInput.length || !$label.length) return;
+
+            const min = parseFloat($minInput.val());
+            const max = parseFloat($maxInput.val());
+
+            if (!isNaN(min) && !isNaN(max)) {
+                const minCredits = usdToCredits(min);
+                const maxCredits = usdToCredits(max);
+                $label.text(`Price: ${minCredits} — ${maxCredits} Credits`);
+            }
+        }
+
+        function updateFilterChips() {
+            // Sidebar chips (optional)
+            $('.woocommerce-widget-price-filter .chosen').each(function() {
+                const $chip = $(this);
+                const html = $chip.html();
+                const match = html.match(/\$([\d.,]+)/);
+                if (match) {
+                    const usd = parseFloat(match[1].replace(/,/g, ''));
+                    const credits = usdToCredits(usd);
+                    const updated = html.replace(/\$[\d.,]+/, `${credits} Credits`);
+                    $chip.html(updated);
+                }
+            });
+        }
+
+        function removeTopPriceChips() {
+            // Remove Min/Max chips from top filter list
+            $('.woocommerce-result-count ~ ul li.chosen').each(function() {
+                const $chip = $(this);
+                const text = $chip.text().toLowerCase();
+                if (text.includes('min') || text.includes('max')) {
+                    $chip.remove();
+                }
+            });
+        }
+
+        // Initial run
+        updateSliderLabel();
+        updateFilterChips();
+        removeTopPriceChips();
+
+        // Re-run on filter changes
+        $(document.body).on('price_slider_slide price_slider_updated', function() {
+            setTimeout(() => {
+                updateSliderLabel();
+                updateFilterChips();
+                removeTopPriceChips();
+            }, 100);
+        });
+      });
+    </script>
+    <?php
+}
