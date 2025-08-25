@@ -67,201 +67,215 @@ function hme_checkout_scripts() {
     }
 }
 
-// Enqueue add-to-cart modal scripts
-add_action( 'wp_enqueue_scripts', 'hme_cart_modal_scripts' );
-function hme_cart_modal_scripts() {
-    if ( is_shop() || is_product() || is_product_category() || is_product_tag() ) {
-        wp_enqueue_script(
-            'hme-add-to-cart-modal',
-            plugin_dir_url( __FILE__ ) . 'js/hme-add-to-cart-modal.js',
-            array( 'jquery' ),
-            '1.0.0',
-            true
-        );
-
-        // Pass data to our modal script
-        wp_localize_script( 'hme-add-to-cart-modal', 'hme_cart_params', array(
-            'ajax_url' => admin_url( 'admin-ajax.php' ),
-            'nonce' => wp_create_nonce( 'hme-cart-modal-nonce' )
-        ) );
+// Add service location fields to single product page AND quick view
+add_action( 'woocommerce_before_add_to_cart_button', 'hme_add_service_location_fields' );
+function hme_add_service_location_fields() {
+    global $product;
+    
+    // Show on single product pages and quick view (quick view detection via AJAX)
+    $is_quick_view = wp_doing_ajax() || ( isset( $_REQUEST['wc-ajax'] ) && $_REQUEST['wc-ajax'] === 'get_refreshed_fragments' );
+    
+    // Allow fields on product pages and quick view
+    if ( ! is_product() && ! $is_quick_view && ! isset( $_REQUEST['action'] ) ) {
+        return;
     }
+    
+    echo '<div class="hme-service-location-fields" style="margin-bottom: 15px;">';
+    
+    echo '<div class="hme-form-group" style="margin-bottom: 10px;">';
+    echo '<label for="hme_service_location" style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">';
+    echo '<span style="font-weight: 600; color: #333;">Service Location <span style="color: red;">*</span></span>';
+    echo '<small style="color: #666; font-size: 11px; font-weight: normal;">This helps our team understand where the service will be performed</small>';
+    echo '</label>';
+    echo '<textarea id="hme_service_location" name="hme_service_location" rows="2" style="width: 100%; padding: 10px; border: 2px solid #ddd; border-radius: 4px; font-size: 14px; resize: vertical; box-sizing: border-box; min-height: 48px;" placeholder="Where will this service be provided (kitchen, master bedroom, etc.)" required></textarea>';
+    echo '</div>';
+    
+    echo '<div class="hme-form-group" style="margin-bottom: 10px;">';
+    echo '<label for="hme_service_photo" style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">';
+    echo '<span style="font-weight: 600; color: #333;">Photo of Area (Optional)</span>';
+    echo '<small style="color: #666; font-size: 11px; font-weight: normal;">Upload a photo to help us better understand the service area</small>';
+    echo '</label>';
+    echo '<input type="file" id="hme_service_photo" name="hme_service_photo" accept="image/*" style="width: 100%; padding: 8px; border: 2px dashed #ddd; border-radius: 4px; background: #f9f9f9; cursor: pointer;" />';
+    echo '</div>';
+    
+    echo '</div>';
+    
+    // Add JavaScript for validation and photo handling
+    ?>
+    <script type="text/javascript">
+    jQuery(document).ready(function($) {
+        // Function to initialize photo upload handling
+        function initPhotoUpload() {
+            // Add hidden field if it doesn't exist
+            if ($('#hme_service_photo_url').length === 0) {
+                $('form.cart').each(function() {
+                    if ($(this).find('#hme_service_photo_url').length === 0) {
+                        $('<input type="hidden" id="hme_service_photo_url" name="hme_service_photo_url" />').appendTo($(this));
+                    }
+                });
+            }
+        }
+        
+        // Initialize on page load
+        initPhotoUpload();
+        
+        // Re-initialize for quick view modals
+        $(document).on('opened', '.quick-view-modal, .mfp-wrap', function() {
+            setTimeout(initPhotoUpload, 100);
+        });
+        
+        // Handle photo upload separately before form submission - use delegation for dynamic forms
+        $(document).on('change', '#hme_service_photo', function() {
+            var photoFile = this.files[0];
+            if (!photoFile) return;
+            
+            // Disable add to cart button while uploading
+            $('.single_add_to_cart_button').prop('disabled', true).text('Photo uploading...');
+            
+            // Show uploading status
+            $(this).prop('disabled', true);
+            $(this).after('<span class="hme-photo-status"> Uploading photo...</span>');
+            
+            // Upload photo via AJAX
+            var formData = new FormData();
+            formData.append('action', 'hme_upload_service_photo');
+            formData.append('service_photo', photoFile);
+            formData.append('nonce', '<?php echo wp_create_nonce( "hme-photo-upload-nonce" ); ?>');
+            
+            $.ajax({
+                url: '<?php echo admin_url( "admin-ajax.php" ); ?>',
+                type: 'POST',
+                data: formData,
+                processData: false,
+                contentType: false,
+                success: function(response) {
+                    if (response.success && response.data.url) {
+                        // Set the photo URL in the hidden field
+                        $('#hme_service_photo_url').val(response.data.url);
+                        $('.hme-photo-status').text(' Photo uploaded successfully!').css('color', 'green');
+                        
+                        // Re-enable add to cart button
+                        $('.single_add_to_cart_button').prop('disabled', false).text('Add to cart');
+                        
+                        // Debug log
+                        console.log('HME: Photo uploaded successfully, URL stored:', response.data.url);
+                    } else {
+                        $('.hme-photo-status').text(' Upload failed: ' + (response.data || 'Unknown error')).css('color', 'red');
+                        $('#hme_service_photo').val('');
+                        
+                        // Re-enable add to cart button even on failure
+                        $('.single_add_to_cart_button').prop('disabled', false).text('Add to cart');
+                    }
+                },
+                error: function() {
+                    $('.hme-photo-status').text(' Network error during upload').css('color', 'red');
+                    $('#hme_service_photo').val('');
+                    
+                    // Re-enable add to cart button on error
+                    $('.single_add_to_cart_button').prop('disabled', false).text('Add to cart');
+                },
+                complete: function() {
+                    $('#hme_service_photo').prop('disabled', false);
+                    setTimeout(function() {
+                        $('.hme-photo-status').fadeOut();
+                    }, 3000);
+                }
+            });
+        });
+        
+        // Validate service location before submission (let WooCommerce handle the actual submission)
+        $(document).on('submit', 'form.cart', function(e) {
+            var locationValue = $('#hme_service_location').val().trim();
+            var photoUrl = $('#hme_service_photo_url').val();
+            var $button = $('.single_add_to_cart_button');
+            
+            if (!locationValue) {
+                e.preventDefault();
+                alert('Please enter the service location before adding to cart.');
+                $('#hme_service_location').focus();
+                return false;
+            }
+            
+            // Check if photo is still uploading
+            if ($button.is(':disabled') && $button.text().includes('uploading')) {
+                e.preventDefault();
+                alert('Please wait for the photo to finish uploading before adding to cart.');
+                return false;
+            }
+            
+            // Debug log
+            console.log('HME: Form submitting with location:', locationValue, 'and photo URL:', photoUrl);
+            
+            // Let WooCommerce handle the form submission normally
+            return true;
+        });
+        
+        // Clear fields after successful cart addition
+        $(document.body).on('added_to_cart', function(event, fragments, cart_hash, $button) {
+            // Clear service location field
+            $('#hme_service_location').val('');
+            
+            // Clear photo field and hidden field
+            $('#hme_service_photo').val('');
+            $('#hme_service_photo_url').val('');
+            
+            // Remove any upload status messages
+            $('.hme-photo-status').remove();
+            
+            console.log('HME: Fields cleared after successful cart addition');
+        });
+        
+        // Add validation styling - use delegation for dynamic forms
+        $(document).on('blur', '#hme_service_location', function() {
+            if ($(this).val().trim()) {
+                $(this).css('border-color', '#28a745');
+            } else {
+                $(this).css('border-color', '#dc3545');
+            }
+        });
+        
+        // Custom cart modal function
+        window.hme_show_cart_modal = function(message) {
+            // Remove any existing modals
+            $('#hme-cart-success-modal').remove();
+            
+            var modalHtml = '<div id="hme-cart-success-modal" style="position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.5); z-index: 999999; display: flex; align-items: center; justify-content: center;">' +
+                '<div style="background: white; padding: 30px; border-radius: 8px; max-width: 400px; text-align: center; box-shadow: 0 10px 30px rgba(0,0,0,0.3);">' +
+                    '<div style="margin-bottom: 20px; color: #28a745; font-size: 48px;">✓</div>' +
+                    '<h3 style="margin: 0 0 15px 0; color: #333;">Item Added Successfully!</h3>' +
+                    '<p style="margin: 0 0 25px 0; color: #666;">' + message + '</p>' +
+                    '<div style="display: flex; gap: 15px; justify-content: center;">' +
+                        '<button id="hme-continue-shopping" style="padding: 12px 24px; background: #f1f1f1; color: #333; border: none; border-radius: 4px; cursor: pointer; font-weight: 600;">Continue Shopping</button>' +
+                        '<a href="' + wc_add_to_cart_params.cart_url + '" id="hme-view-cart" style="padding: 12px 24px; background: #007cba; color: white; border: none; border-radius: 4px; cursor: pointer; font-weight: 600; text-decoration: none; display: inline-block;">View Cart</a>' +
+                    '</div>' +
+                '</div>' +
+            '</div>';
+            
+            $('body').append(modalHtml);
+            
+            // Handle continue shopping
+            $('#hme-continue-shopping').click(function() {
+                $('#hme-cart-success-modal').remove();
+            });
+            
+            // Handle modal background click
+            $('#hme-cart-success-modal').click(function(e) {
+                if (e.target.id === 'hme-cart-success-modal') {
+                    $(this).remove();
+                }
+            });
+        };
+    });
+    </script>
+    <?php
 }
 
-// Add modal CSS styles
-add_action( 'wp_head', 'hme_add_cart_modal_styles' );
-function hme_add_cart_modal_styles() {
-    if ( is_shop() || is_product() || is_product_category() || is_product_tag() ) {
-        ?>
+// Add service location styles and hide unwanted buttons
+add_action( 'wp_head', 'hme_add_service_location_styles' );
+function hme_add_service_location_styles() {
+    ?>
+    <?php if ( is_product() || is_cart() || is_shop() || is_product_category() || is_product_tag() ) : ?>
         <style type="text/css">
-        /* Modal Styles */
-        .hme-modal {
-            position: fixed;
-            top: 0;
-            left: 0;
-            width: 100%;
-            height: 100%;
-            background-color: rgba(0, 0, 0, 0.5);
-            z-index: 999999;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-        }
-
-        .hme-modal-content {
-            background: white;
-            border-radius: 8px;
-            max-width: 500px;
-            width: 90%;
-            max-height: 90vh;
-            overflow-y: auto;
-            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.3);
-            position: relative;
-        }
-
-        .hme-modal-header {
-            padding: 20px 20px 0;
-            border-bottom: 1px solid #eee;
-            position: relative;
-            margin-bottom: 20px;
-        }
-
-        .hme-modal-header h3 {
-            margin: 0 0 20px 0;
-            font-size: 1.4em;
-            color: #333;
-        }
-
-        .hme-modal-close {
-            position: absolute;
-            top: 15px;
-            right: 20px;
-            font-size: 28px;
-            color: #aaa;
-            cursor: pointer;
-            line-height: 1;
-            transition: color 0.2s;
-        }
-
-        .hme-modal-close:hover {
-            color: #000;
-        }
-
-        .hme-modal-body {
-            padding: 0 20px 20px;
-        }
-
-        .hme-form-group {
-            margin-bottom: 20px;
-        }
-
-        .hme-form-group label {
-            display: block;
-            margin-bottom: 8px;
-            font-weight: 600;
-            color: #333;
-        }
-
-        .hme-form-group textarea {
-            width: 100%;
-            padding: 12px;
-            border: 2px solid #ddd;
-            border-radius: 4px;
-            font-size: 14px;
-            resize: vertical;
-            transition: border-color 0.2s;
-            box-sizing: border-box;
-        }
-
-        .hme-form-group textarea:focus {
-            outline: none;
-            border-color: #007cba;
-        }
-
-        .hme-form-group input[type="file"] {
-            width: 100%;
-            padding: 8px;
-            border: 2px dashed #ddd;
-            border-radius: 4px;
-            background: #f9f9f9;
-            cursor: pointer;
-            transition: border-color 0.2s;
-        }
-
-        .hme-form-group input[type="file"]:hover {
-            border-color: #007cba;
-        }
-
-        .hme-form-group small {
-            display: block;
-            margin-top: 5px;
-            color: #666;
-            font-size: 12px;
-        }
-
-        .hme-modal-footer {
-            padding: 20px;
-            border-top: 1px solid #eee;
-            display: flex;
-            justify-content: flex-end;
-            gap: 10px;
-        }
-
-        .hme-btn {
-            padding: 10px 20px;
-            border: none;
-            border-radius: 4px;
-            cursor: pointer;
-            font-size: 14px;
-            font-weight: 600;
-            text-decoration: none;
-            display: inline-block;
-            transition: all 0.2s;
-        }
-
-        .hme-btn-secondary {
-            background: #f1f1f1;
-            color: #333;
-        }
-
-        .hme-btn-secondary:hover {
-            background: #e0e0e0;
-        }
-
-        .hme-btn-primary {
-            background: #007cba;
-            color: white;
-        }
-
-        .hme-btn-primary:hover {
-            background: #005a87;
-        }
-
-        .hme-btn:disabled {
-            opacity: 0.6;
-            cursor: not-allowed;
-        }
-
-        .hme-modal-open {
-            overflow: hidden;
-        }
-
-        /* Mobile responsive */
-        @media (max-width: 600px) {
-            .hme-modal-content {
-                width: 95%;
-                margin: 20px;
-            }
-            
-            .hme-modal-footer {
-                flex-direction: column;
-            }
-            
-            .hme-btn {
-                width: 100%;
-                text-align: center;
-            }
-        }
-
         /* Service location display in cart */
         .hme-service-location-info {
             margin-top: 5px;
@@ -275,28 +289,131 @@ function hme_add_cart_modal_styles() {
 
         .hme-service-photo {
             margin-top: 8px;
+            display: flex;
+            align-items: center;
+            gap: 10px;
         }
 
-        .hme-service-photo img {
-            max-width: 60px;
-            height: auto;
-            border-radius: 4px;
-            border: 1px solid #ddd;
+        .hme-service-photo img:hover {
+            opacity: 0.9;
+            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.2);
         }
 
-        .hme-service-photo a {
+        .hme-service-photo a:hover {
+            text-decoration: underline;
+        }
+
+        /* Product page service location fields */
+        .hme-service-location-fields {
+            background: #f8f9fa;
+            border: 1px solid #dee2e6;
+            border-radius: 8px;
+            padding: 20px;
+            margin-bottom: 20px;
+        }
+
+        .hme-service-location-fields h4 {
+            margin-top: 0;
+            color: #495057;
+            font-size: 1.1em;
+        }
+        
+        /* Hide add to cart buttons on product listings (shop, category pages) */
+        .products .product .add_to_cart_button,
+        .products .product .product_type_simple,
+        .products .product .product_type_variable,
+        .products .product .ajax_add_to_cart,
+        .product-grid-item .add_to_cart_button,
+        .product-list-item .add_to_cart_button,
+        .wd-action-btn.wd-add-cart-btn,
+        .wd-bottom-actions .wd-add-btn,
+        .product .button.add_to_cart_button {
+            display: none !important;
+        }
+        
+        /* Hide Buy Now buttons everywhere */
+        .single_add_to_cart_button.buy_now_button,
+        .buy-now-button,
+        button[name="wd-buy-now"],
+        .wd-buy-now-btn,
+        .quick-shop-button,
+        .product-quick-view .buy_now_button,
+        form.cart .buy-now,
+        .woocommerce-variation-add-to-cart .buy-now {
+            display: none !important;
+        }
+        
+        /* Keep only quick view and compare icons visible */
+        .wd-buttons.wd-pos-r-t {
+            .wd-action-btn:not(.wd-quick-view-btn):not(.wd-compare-btn) {
+                display: none !important;
+            }
+        }
+        
+        /* Ensure quick view and compare buttons stay visible */
+        .wd-quick-view-btn,
+        .wd-compare-btn,
+        .product-compare,
+        .quick-view-button {
+            display: inline-flex !important;
+        }
+        
+        /* Custom success modal styles */
+        #hme-cart-success-modal button:hover {
+            opacity: 0.9;
+            transform: translateY(-1px);
+        }
+        
+        #hme-cart-success-modal a:hover {
+            opacity: 0.9;
+            transform: translateY(-1px);
             text-decoration: none;
-            color: #007cba;
-            font-size: 11px;
         }
         </style>
-        <?php
-    }
+        
+        <script type="text/javascript">
+        jQuery(document).ready(function($) {
+            // Remove add to cart buttons from product listings
+            function removeListingButtons() {
+                $('.products .add_to_cart_button, .products .product_type_simple, .products .ajax_add_to_cart').remove();
+                $('.wd-action-btn.wd-add-cart-btn, .wd-bottom-actions .wd-add-btn').remove();
+            }
+            
+            // Remove Buy Now buttons
+            function removeBuyNowButtons() {
+                $('[name="wd-buy-now"], .wd-buy-now-btn, .buy-now-button, .buy_now_button').remove();
+            }
+            
+            // Initial removal
+            removeListingButtons();
+            removeBuyNowButtons();
+            
+            // Remove buttons when content is dynamically loaded
+            $(document).on('ajaxComplete', function() {
+                removeListingButtons();
+                removeBuyNowButtons();
+            });
+            
+            // For quick view modal - wait for it to load then initialize
+            $(document).on('opened', '.quick-view-modal, .mfp-wrap', function() {
+                setTimeout(function() {
+                    // Re-initialize form validation for quick view
+                    if ($('#hme_service_location').length === 0) {
+                        // If fields aren't there yet, trigger the action again
+                        $(document).trigger('woocommerce_before_add_to_cart_button');
+                    }
+                    removeBuyNowButtons();
+                }, 100);
+            });
+        });
+        </script>
+    <?php endif; ?>
+    <?php
 }
 
-// 2) Carry material cost into the cart item
-add_filter( 'woocommerce_add_cart_item_data', 'hme_add_material_to_cart', 10, 3 );
-function hme_add_material_to_cart( $cart_item_data, $product_id, $variation_id = 0 ) {
+// 2) Carry material cost AND service location/photo into the cart item
+add_filter( 'woocommerce_add_cart_item_data', 'hme_add_custom_cart_data', 10, 3 );
+function hme_add_custom_cart_data( $cart_item_data, $product_id, $variation_id = 0 ) {
     // Get material cost from variation if it exists, otherwise from product
     $actual_id = $variation_id ? $variation_id : $product_id;
     $mat = get_post_meta( $actual_id, 'customer material', true );
@@ -307,20 +424,36 @@ function hme_add_material_to_cart( $cart_item_data, $product_id, $variation_id =
         $cart_item_data['fc_material'] = floatval($mat_clean);
     }
     
-    // Add unique identifier if not already present (fallback for direct add to cart bypassing modal)
-    if ( ! isset( $cart_item_data['hme_item_number'] ) && ! isset( $cart_item_data['hme_service_location'] ) ) {
-        $cart_item_data['hme_item_timestamp'] = current_time( 'timestamp' ) . '_' . wp_generate_password( 8, false );
+    // Capture service location from POST data (from our textarea field)
+    if ( isset( $_POST['hme_service_location'] ) && ! empty( $_POST['hme_service_location'] ) ) {
+        $cart_item_data['hme_service_location'] = sanitize_textarea_field( $_POST['hme_service_location'] );
     }
+    
+    // Capture photo URL from POST data (from our hidden field set by AJAX upload)
+    if ( isset( $_POST['hme_service_photo_url'] ) && ! empty( $_POST['hme_service_photo_url'] ) ) {
+        $cart_item_data['hme_service_photo'] = esc_url_raw( $_POST['hme_service_photo_url'] );
+        error_log( 'HME: Photo URL captured from POST: ' . $_POST['hme_service_photo_url'] );
+    } else {
+        error_log( 'HME: No photo URL found in POST data. Available POST keys: ' . implode( ', ', array_keys( $_POST ) ) );
+    }
+    
+    // Add timestamp for uniqueness to prevent cart item merging
+    $cart_item_data['hme_service_timestamp'] = current_time( 'timestamp' );
+    
+    // Add unique identifier to prevent WooCommerce from combining items
+    $cart_item_data['hme_item_unique'] = wp_generate_password( 8, false );
+    
+    error_log( 'HME: Native cart data capture - Location: ' . ( isset( $cart_item_data['hme_service_location'] ) ? $cart_item_data['hme_service_location'] : 'none' ) . ', Photo: ' . ( isset( $cart_item_data['hme_service_photo'] ) ? 'yes' : 'no' ) );
     
     return $cart_item_data;
 }
 
-// Split quantities into separate cart items for regular WooCommerce add to cart (fallback)
+// Split quantities into separate cart items for all products
 add_filter( 'woocommerce_add_to_cart', 'hme_split_cart_quantities', 10, 6 );
 function hme_split_cart_quantities( $cart_item_key, $product_id, $quantity, $variation_id, $variation, $cart_item_data ) {
-    // Only apply to direct add to cart (not modal submissions)
-    if ( isset( $cart_item_data['hme_service_location'] ) || $quantity <= 1 ) {
-        return $cart_item_key; // Skip if already handled by modal or single quantity
+    // Skip if single quantity or already has our service location data
+    if ( $quantity <= 1 || isset( $cart_item_data['hme_service_location'] ) ) {
+        return $cart_item_key;
     }
     
     // Remove the item that was just added with combined quantity
@@ -390,15 +523,49 @@ function hme_split_cart_quantity_updates( $cart_item_key, $quantity, $old_quanti
         );
     }
     
-    // Add a notice to inform the customer
+    // Store info about items that need location data
+    $pending_items = array();
+    for ( $i = 2; $i <= $quantity; $i++ ) {
+        $pending_items[] = array(
+            'product_id' => $product_id,
+            'variation_id' => $variation_id,
+            'item_number' => $i
+        );
+    }
+    WC()->session->set( 'hme_pending_location_items', $pending_items );
+    
+    // Add a notice about quantity update
     wc_add_notice( 
-        sprintf( 
-            'Quantity updated! Each item is now shown as a separate line for individual service tracking.' 
-        ), 
+        'Quantity updated! Each item is now shown as a separate line. You can add service locations for each item.', 
         'notice' 
     );
 }
 
+// AJAX handler to get pending items
+add_action( 'wp_ajax_hme_get_pending_items', 'hme_get_pending_items' );
+add_action( 'wp_ajax_nopriv_hme_get_pending_items', 'hme_get_pending_items' );
+function hme_get_pending_items() {
+    $pending_items = WC()->session->get( 'hme_pending_location_items' );
+    
+    if ( empty( $pending_items ) ) {
+        wp_send_json_error( 'No pending items' );
+    }
+    
+    wp_send_json_success( $pending_items );
+}
+
+// Add "Add Service Locations" button to cart when there are pending items
+add_action( 'woocommerce_proceed_to_checkout', 'hme_show_pending_locations_button', 5 );
+function hme_show_pending_locations_button() {
+    $pending_items = WC()->session->get( 'hme_pending_location_items' );
+    
+    if ( ! empty( $pending_items ) ) {
+        echo '<div class="hme-pending-locations-notice" style="margin-bottom: 20px; padding: 15px; background: #f0f8ff; border: 1px solid #007cba; border-radius: 4px;">';
+        echo '<p><strong>Service Locations Required:</strong> You have ' . count( $pending_items ) . ' item(s) that need service location information.</p>';
+        echo '<button type="button" id="hme-add-locations-btn" class="button alt" style="background: #007cba; color: white;">Add Service Locations</button>';
+        echo '</div>';
+    }
+}
 
 // 3) Before totals: recalc each line's USD price from grouped credits
 add_action( 'woocommerce_before_calculate_totals', 'hme_dynamic_credit_pricing_grouped', 20 );
@@ -560,16 +727,20 @@ function hme_show_material_under_item( $name, $cart_item, $cart_item_key ) {
     // Display service location
     if ( isset( $cart_item['hme_service_location'] ) && ! empty( $cart_item['hme_service_location'] ) ) {
         $name .= '<div class="hme-service-location-info">';
-        $name .= '<strong>Service Location:</strong><br>';
-        $name .= esc_html( $cart_item['hme_service_location'] );
+        $name .= '<strong>Service Location:</strong> ' . esc_html( $cart_item['hme_service_location'] );
         $name .= '</div>';
     }
     
     // Display service photo
     if ( isset( $cart_item['hme_service_photo'] ) && ! empty( $cart_item['hme_service_photo'] ) ) {
-        $name .= '<div class="hme-service-photo">';
-        $name .= '<img src="' . esc_url( $cart_item['hme_service_photo'] ) . '" alt="Service area photo" title="Service area photo" />';
-        $name .= '<br><a href="' . esc_url( $cart_item['hme_service_photo'] ) . '" target="_blank">View full image</a>';
+        $full_image_url = $cart_item['hme_service_photo'];
+        $thumbnail_url = hme_get_image_thumbnail( $full_image_url, 60, 60 );
+        
+        $name .= '<div class="hme-service-photo" style="display: flex; align-items: center; gap: 10px; margin-top: 8px;">';
+        $name .= '<a href="' . esc_url( $full_image_url ) . '" target="_blank" style="text-decoration: none;">';
+        $name .= '<img src="' . esc_url( $thumbnail_url ) . '" alt="Service area photo" title="Click to view full size" style="width: 60px; height: 60px; object-fit: cover; border-radius: 4px; border: 1px solid #ddd; cursor: pointer;" />';
+        $name .= '</a>';
+        $name .= '<a href="' . esc_url( $full_image_url ) . '" target="_blank" style="color: #007cba; padding:0; margin-left: 10px; font-size: 11px; text-decoration: none;">View full image</a>';
         $name .= '</div>';
     }
     
@@ -664,10 +835,50 @@ function hme_get_cart_credit_total() {
     ]);
 }
 
+// Add AJAX handler for photo upload only
+add_action( 'wp_ajax_hme_upload_service_photo', 'hme_upload_service_photo_ajax' );
+add_action( 'wp_ajax_nopriv_hme_upload_service_photo', 'hme_upload_service_photo_ajax' );
+function hme_upload_service_photo_ajax() {
+    // Verify nonce
+    if ( ! wp_verify_nonce( $_POST['nonce'], 'hme-photo-upload-nonce' ) ) {
+        wp_send_json_error( 'Invalid nonce' );
+    }
+    
+    // Check if file was uploaded
+    if ( ! isset( $_FILES['service_photo'] ) || $_FILES['service_photo']['error'] != 0 ) {
+        wp_send_json_error( 'No file uploaded' );
+    }
+    
+    // Handle the upload
+    $upload_result = hme_handle_service_photo_upload( $_FILES['service_photo'] );
+    
+    if ( is_wp_error( $upload_result ) ) {
+        wp_send_json_error( $upload_result->get_error_message() );
+    }
+    
+    wp_send_json_success( array( 'url' => $upload_result ) );
+}
+
+/* DEPRECATED - No longer using custom cart submission
 // Add AJAX handler for modal cart submission
 add_action( 'wp_ajax_hme_add_to_cart_with_location', 'hme_add_to_cart_with_location' );
 add_action( 'wp_ajax_nopriv_hme_add_to_cart_with_location', 'hme_add_to_cart_with_location' );
 function hme_add_to_cart_with_location() {
+    // Prevent duplicate processing by checking if we've already processed this product in the last few seconds
+    $cache_key = 'hme_cart_process_' . intval( $_POST['product_id'] ) . '_' . get_current_user_id();
+    $last_process_time = get_transient( $cache_key );
+    
+    if ( $last_process_time && ( time() - $last_process_time ) < 3 ) {
+        error_log( 'HME: Preventing duplicate cart submission within 3 seconds' );
+        wp_send_json_error( 'Duplicate submission prevented' );
+    }
+    
+    // Set timestamp to prevent duplicates
+    set_transient( $cache_key, time(), 5 ); // 5 second window
+    
+    // Set a flag to prevent other cart processes from interfering
+    $_POST['hme_custom_cart_process'] = true;
+    
     // Verify nonce
     if ( ! wp_verify_nonce( $_POST['nonce'], 'hme-cart-modal-nonce' ) ) {
         wp_send_json_error( 'Invalid nonce' );
@@ -677,9 +888,19 @@ function hme_add_to_cart_with_location() {
     $variation_id = intval( $_POST['variation_id'] );
     $quantity = intval( $_POST['quantity'] );
     $service_location = sanitize_textarea_field( $_POST['service_location'] );
+    
+    error_log( 'HME: Starting custom cart addition - Product: ' . $product_id . ', Quantity: ' . $quantity . ', Has photo: ' . ( isset( $_FILES['service_photo'] ) ? 'YES' : 'NO' ) );
 
     if ( ! $product_id || ! $service_location ) {
         wp_send_json_error( 'Missing required information' );
+    }
+
+    // Collect variation attributes
+    $variation_attributes = array();
+    foreach ( $_POST as $key => $value ) {
+        if ( strpos( $key, 'attribute_' ) === 0 ) {
+            $variation_attributes[ sanitize_text_field( $key ) ] = sanitize_text_field( $value );
+        }
     }
 
     // Handle file upload
@@ -705,31 +926,71 @@ function hme_add_to_cart_with_location() {
             'hme_item_number' => $i // Unique identifier to prevent combining
         );
 
+        error_log( 'HME: Adding item to cart with data: ' . wp_json_encode( $cart_item_data ) );
+
         // Add individual item to cart (quantity = 1)
         $cart_item_key = WC()->cart->add_to_cart( 
             $product_id, 
             1, // Always add quantity 1 since we're looping
             $variation_id, 
-            array(), 
+            $variation_attributes, 
             $cart_item_data 
         );
 
         if ( $cart_item_key ) {
             $success_count++;
             $cart_item_keys[] = $cart_item_key;
+            
+            // Verify the data was saved to the cart item
+            $cart_item = WC()->cart->cart_contents[ $cart_item_key ];
+            error_log( 'HME: Cart item saved with location: ' . ( isset( $cart_item['hme_service_location'] ) ? $cart_item['hme_service_location'] : 'NOT FOUND' ) );
+        } else {
+            error_log( 'HME: Failed to add item to cart' );
         }
     }
 
     if ( $success_count > 0 ) {
-        // Get updated cart fragments
-        WC_AJAX::get_refreshed_fragments();
+        // Force cart session save immediately and wait for completion
+        WC()->cart->persistent_cart_update();
+        
+        // Force session save to database immediately
+        WC()->session->save_data();
+        
+        // Verify all items were saved correctly
+        foreach ( $cart_item_keys as $key ) {
+            $cart_item = WC()->cart->cart_contents[ $key ];
+            if ( ! isset( $cart_item['hme_service_location'] ) || empty( $cart_item['hme_service_location'] ) ) {
+                // Re-add the service location if it's missing
+                WC()->cart->cart_contents[ $key ]['hme_service_location'] = $service_location;
+                if ( ! empty( $photo_url ) ) {
+                    WC()->cart->cart_contents[ $key ]['hme_service_photo'] = $photo_url;
+                }
+                error_log( 'HME: Had to re-add service location to cart item: ' . $key );
+            }
+        }
+        
+        // Final cart save after verification
+        WC()->cart->persistent_cart_update();
+        
+        // Check if this was the last pending item and clear session if so
+        $pending_items = WC()->session->get( 'hme_pending_location_items' );
+        if ( ! empty( $pending_items ) ) {
+            // Remove the first pending item
+            array_shift( $pending_items );
+            WC()->session->set( 'hme_pending_location_items', $pending_items );
+            
+            // If no more pending items, clear the session
+            if ( empty( $pending_items ) ) {
+                WC()->session->__unset( 'hme_pending_location_items' );
+            }
+        }
         
         $message = $success_count === 1 ? 'Item added to cart successfully!' : "$success_count items added to cart successfully!";
         
         $data = array(
             'message' => $message,
             'cart_hash' => WC()->cart->get_cart_hash(),
-            'fragments' => apply_filters( 'woocommerce_add_to_cart_fragments', array() )
+            'fragments' => array() // Empty fragments to avoid cart update issues
         );
         
         wp_send_json_success( $data );
@@ -737,23 +998,25 @@ function hme_add_to_cart_with_location() {
         wp_send_json_error( 'Failed to add items to cart' );
     }
 }
+*/
 
 // Handle service photo upload
 function hme_handle_service_photo_upload( $file ) {
     if ( ! function_exists( 'wp_handle_upload' ) ) {
         require_once( ABSPATH . 'wp-admin/includes/file.php' );
     }
+    
 
     // Validate file type
-    $allowed_types = array( 'image/jpeg', 'image/jpg', 'image/png', 'image/gif', 'image/webp' );
-    if ( ! in_array( $file['type'], $allowed_types ) ) {
+    $allowed_types = array( 'image/jpeg', 'image/jpg', 'image/png', 'image/gif', 'image/webp', 'image/heic', 'image/heif' );
+    if ( ! in_array( strtolower( $file['type'] ), $allowed_types ) ) {
         return new WP_Error( 'invalid_file_type', 'Only image files are allowed' );
     }
 
-    // Validate file size (5MB max)
-    $max_size = 5 * 1024 * 1024; // 5MB
+    // Increase file size limit to 20MB (reasonable for phone photos)
+    $max_size = 20 * 1024 * 1024; // 20MB
     if ( $file['size'] > $max_size ) {
-        return new WP_Error( 'file_too_large', 'Image must be smaller than 5MB' );
+        return new WP_Error( 'file_too_large', 'Image must be smaller than 20MB' );
     }
 
     $upload_overrides = array(
@@ -770,6 +1033,59 @@ function hme_handle_service_photo_upload( $file ) {
     }
 
     return $uploaded_file['url'];
+}
+
+// Generate thumbnail for cart display
+function hme_get_image_thumbnail( $image_url, $width = 60, $height = 60 ) {
+    if ( empty( $image_url ) ) {
+        return '';
+    }
+    
+    // Include image functions if not already loaded
+    if ( ! function_exists( 'wp_get_image_editor' ) ) {
+        require_once( ABSPATH . 'wp-admin/includes/image.php' );
+    }
+    
+    // Get the attachment ID from the URL
+    $attachment_id = attachment_url_to_postid( $image_url );
+    
+    if ( $attachment_id ) {
+        // Use WordPress to generate/get thumbnail
+        $thumbnail = wp_get_attachment_image_src( $attachment_id, array( $width, $height ) );
+        if ( $thumbnail ) {
+            return $thumbnail[0];
+        }
+    }
+    
+    // Fallback: Use WordPress image resize API
+    $upload_dir = wp_get_upload_dir();
+    $image_path = str_replace( $upload_dir['baseurl'], $upload_dir['basedir'], $image_url );
+    
+    if ( file_exists( $image_path ) ) {
+        // Generate thumbnail filename
+        $path_info = pathinfo( $image_path );
+        $thumbnail_path = $path_info['dirname'] . '/' . $path_info['filename'] . '-thumb-' . $width . 'x' . $height . '.' . $path_info['extension'];
+        $thumbnail_url = str_replace( $upload_dir['basedir'], $upload_dir['baseurl'], $thumbnail_path );
+        
+        // Check if thumbnail already exists
+        if ( file_exists( $thumbnail_path ) ) {
+            return $thumbnail_url;
+        }
+        
+        // Create thumbnail
+        $image_editor = wp_get_image_editor( $image_path );
+        if ( ! is_wp_error( $image_editor ) ) {
+            $image_editor->resize( $width, $height, true ); // true = crop to exact dimensions
+            $saved = $image_editor->save( $thumbnail_path );
+            
+            if ( ! is_wp_error( $saved ) ) {
+                return $thumbnail_url;
+            }
+        }
+    }
+    
+    // Final fallback: return original image (browser will still resize but will load full file)
+    return $image_url;
 }
 
 // Save service location and photo data to order items
@@ -1301,6 +1617,128 @@ function hme_default_checkout_state() {
     return 'UT';
 }
 
+/* ──────────────────  AGREEMENT CHECKBOX AT CHECKOUT  ───────────────────── */
+
+// Add agreement checkbox just before Place Order button (after gift cards)
+// Using priority 20 to ensure it runs after gift card fields
+add_action( 'woocommerce_review_order_before_submit', 'hme_add_agreement_checkbox', 20 );
+function hme_add_agreement_checkbox() {
+    ?>
+    <div id="hme-agreement-section" style="background: #f7f7f7; padding: 20px; margin: 20px 0; border: 1px solid #ddd; border-radius: 5px;">
+        <h3 style="margin-top: 0;">Terms and Agreements</h3>
+        <p style="margin-bottom: 15px;">Please review and accept the following agreements before proceeding with your order:</p>
+        
+        <ul style="list-style: disc; margin-left: 20px; margin-bottom: 20px;">
+            <li style="margin-bottom: 0;"><a href="https://staging.homemaintexperts.com/terms-and-conditions/" target="_blank" style="color: #0073aa; text-decoration: underline;">Terms & Conditions</a></li>
+            <li style="margin-bottom: 0;"><a href="https://staging.homemaintexperts.com/privacy-policy" target="_blank" style="color: #0073aa; text-decoration: underline;">Privacy Policy</a></li>
+            <li style="margin-bottom: 0;"><a href="https://staging.homemaintexperts.com/customer-waiver-of-customer-supplied-materials/" target="_blank" style="color: #0073aa; text-decoration: underline;">Customer Waiver of Customer Supplied Materials</a></li>
+            <li style="margin-bottom: 0;"><a href="https://staging.homemaintexperts.com/property-access-agreement/" target="_blank" style="color: #0073aa; text-decoration: underline;">Property Access Agreement</a></li>
+        </ul>
+        
+        <label style="display: flex; align-items: flex-start; cursor: pointer;">
+            <input type="checkbox" id="hme_agreement_checkbox" name="hme_agreement_checkbox" value="1" style="margin-right: 10px; margin-top: 3px;">
+            <span style="flex: 1;">
+                <strong>I have read and agree to all of the above terms, conditions, and agreements.</strong>
+                <br>
+                <small style="color: #666;">By checking this box, you acknowledge that you have reviewed and accept all four agreements listed above.</small>
+            </span>
+        </label>
+        <input type="hidden" id="hme_agreement_timestamp" name="hme_agreement_timestamp" value="">
+    </div>
+    
+    <script type="text/javascript">
+    jQuery(function($) {
+        // Update timestamp when checkbox is checked
+        $('#hme_agreement_checkbox').on('change', function() {
+            if ($(this).is(':checked')) {
+                var timestamp = Math.floor(Date.now() / 1000);
+                $('#hme_agreement_timestamp').val(timestamp);
+            } else {
+                $('#hme_agreement_timestamp').val('');
+            }
+        });
+        
+        // Prevent form submission if checkbox not checked
+        $('form.checkout').on('checkout_place_order', function() {
+            if (!$('#hme_agreement_checkbox').is(':checked')) {
+                // Scroll to agreement section
+                $('html, body').animate({
+                    scrollTop: $('#hme-agreement-section').offset().top - 100
+                }, 500);
+                
+                // Highlight the checkbox section
+                $('#hme-agreement-section').css({
+                    'border-color': '#dc3545',
+                    'background-color': '#fff5f5'
+                });
+                
+                // Show error message
+                if (!$('#hme-agreement-error').length) {
+                    $('#hme-agreement-section').prepend(
+                        '<div id="hme-agreement-error" style="background: #dc3545; color: white; padding: 10px; margin-bottom: 15px; border-radius: 3px;">' +
+                        '<strong>Required:</strong> You must agree to the terms and conditions before placing your order.' +
+                        '</div>'
+                    );
+                }
+                
+                return false;
+            }
+            return true;
+        });
+        
+        // Remove error styling when checkbox is checked
+        $('#hme_agreement_checkbox').on('change', function() {
+            if ($(this).is(':checked')) {
+                $('#hme-agreement-error').remove();
+                $('#hme-agreement-section').css({
+                    'border-color': '#ddd',
+                    'background-color': '#f7f7f7'
+                });
+            }
+        });
+    });
+    </script>
+    <?php
+}
+
+// Validate agreement checkbox on server side
+add_action( 'woocommerce_checkout_process', 'hme_validate_agreement_checkbox' );
+function hme_validate_agreement_checkbox() {
+    if ( ! isset( $_POST['hme_agreement_checkbox'] ) || $_POST['hme_agreement_checkbox'] != '1' ) {
+        wc_add_notice( '<strong>Agreement Required:</strong> Please read and accept all terms, conditions, and agreements before placing your order.', 'error' );
+    }
+}
+
+// Save agreement timestamp to order
+add_action( 'woocommerce_checkout_create_order', 'hme_save_agreement_to_order', 10, 2 );
+function hme_save_agreement_to_order( $order, $data ) {
+    if ( isset( $_POST['hme_agreement_checkbox'] ) && $_POST['hme_agreement_checkbox'] == '1' ) {
+        $timestamp = isset( $_POST['hme_agreement_timestamp'] ) ? sanitize_text_field( $_POST['hme_agreement_timestamp'] ) : time();
+        
+        // Save agreement data as order meta
+        $order->update_meta_data( '_hme_agreements_accepted', 'yes' );
+        $order->update_meta_data( '_hme_agreements_timestamp', $timestamp );
+        $order->update_meta_data( '_hme_agreements_datetime', date( 'Y-m-d H:i:s', $timestamp ) );
+        
+        // Add order note for record keeping
+        $order->add_order_note( sprintf( 
+            'Customer accepted all terms and agreements on %s', 
+            date( 'F j, Y \a\t g:i A', $timestamp ) 
+        ) );
+    }
+}
+
+// Display agreement info in admin order page
+add_action( 'woocommerce_admin_order_data_after_billing_address', 'hme_display_agreement_in_admin', 10, 1 );
+function hme_display_agreement_in_admin( $order ) {
+    $accepted = $order->get_meta( '_hme_agreements_accepted' );
+    $datetime = $order->get_meta( '_hme_agreements_datetime' );
+    
+    if ( $accepted === 'yes' && $datetime ) {
+        echo '<p><strong>Agreements Accepted:</strong> ' . esc_html( $datetime ) . '</p>';
+    }
+}
+
 // Add Stripe Processing Fees to Cart Total (Server-Side)
 add_action( 'woocommerce_cart_calculate_fees', 'hme_add_stripe_processing_fee_to_cart' );
 function hme_add_stripe_processing_fee_to_cart( $cart ) {
@@ -1675,17 +2113,69 @@ function hme_update_jobnimbus_appointment_dates( $order_id, $start_date, $end_da
 
     $updated_work_orders = 0;
     if ( ! empty( $work_orders['results'] ) ) {
+        // Get customer information from the order
+        $customer_name = $order->get_billing_first_name() . ' ' . $order->get_billing_last_name();
+        $customer_address = $order->get_billing_address_1();
+        if ( $order->get_billing_address_2() ) {
+            $customer_address .= ' ' . $order->get_billing_address_2();
+        }
+        $customer_address .= ', ' . $order->get_billing_city() . ', ' . $order->get_billing_state() . ' ' . $order->get_billing_postcode();
+        $customer_phone = $order->get_billing_phone();
+        $customer_email = $order->get_billing_email();
+        
         foreach ( $work_orders['results'] as $work_order ) {
             error_log( 'HME: Updating work order ' . $work_order['jnid'] . ' with dates' );
-            $work_order_result = hme_jn( "v2/workorders/{$work_order['jnid']}", 'PUT', [
+            
+            // Format appointment dates
+            $start_formatted = date( 'n/j/y g:i A', $date_start );
+            $end_formatted = date( 'n/j/y g:i A', $date_end );
+            
+            // Build customer note with HTML formatting
+            $customer_note = "<strong>Website Order</strong> \n\n";
+            $customer_note .= "<u>Customer Info</u> \n";
+            $customer_note .= $customer_name . " \n";
+            $customer_note .= $customer_phone . " \n";
+            $customer_note .= $customer_email . " \n\n";
+            $customer_note .= "<u>Address</u> \n";
+            $customer_note .= $order->get_billing_address_1();
+            if ( $order->get_billing_address_2() ) {
+                $customer_note .= " \n" . $order->get_billing_address_2();
+            }
+            $customer_note .= " \n";
+            $customer_note .= $order->get_billing_city() . ", " . $order->get_billing_state() . " " . $order->get_billing_postcode();
+            $customer_note .= " \n\n";
+            $customer_note .= "<u>Appointment</u> \n";
+            $customer_note .= $start_formatted . " → " . $end_formatted;
+            
+            // Build internal note (plain text)
+            $internal_note = $customer_name . " \n";
+            $internal_note .= $customer_phone . " \n";
+            $internal_note .= $customer_email . " \n\n";
+            $internal_note .= $order->get_billing_address_1();
+            if ( $order->get_billing_address_2() ) {
+                $internal_note .= " \n" . $order->get_billing_address_2();
+            }
+            $internal_note .= " \n";
+            $internal_note .= $order->get_billing_city() . ", " . $order->get_billing_state() . " " . $order->get_billing_postcode();
+            $internal_note .= " \n\n";
+            $internal_note .= "Appointment: " . $start_formatted . " → " . $end_formatted;
+            
+            // Build minimal update payload - ONLY the fields needed
+            $update_payload = array(
+                'type' => 'workorder',
+                'merged' => null,
+                'customer_note' => $customer_note,
+                'internal_note' => $internal_note,
                 'date_start' => $date_start,
                 'date_end' => $date_end,
-                'status_name' => 'Scheduled'
-            ] );
+                'jnid' => $work_order['jnid']  // Must include jnid to match the URL
+            );
+            
+            $work_order_result = hme_jn( "v2/workorders/{$work_order['jnid']}", 'PUT', $update_payload );
             
             if ( $work_order_result ) {
                 $updated_work_orders++;
-                error_log( 'HME: Successfully updated work order ' . $work_order['jnid'] );
+                error_log( 'HME: Successfully updated work order ' . $work_order['jnid'] . ' with appointment info' );
             } else {
                 error_log( 'HME: Failed to update work order ' . $work_order['jnid'] );
             }
@@ -2396,25 +2886,59 @@ function hme_create_work_order_with_line_items( $job_id, $order ) {
             continue;
         }
         
-        // Commented out description to let JobNimbus auto-set based on product selection
-        // $description = $product->get_description() ?: 'Service from website order';
-        // 
-        // // Add material cost information to description if present
-        // if ( $material_cost > 0 ) {
-        //     $description .= ' (Material cost: $' . number_format( $material_cost, 2 ) . ')';
-        // }
-        //
-        // // Add service location information if available
-        // if ( isset( $item['hme_service_location'] ) && ! empty( $item['hme_service_location'] ) ) {
-        //     $description .= "\nService Location: " . $item['hme_service_location'];
-        // }
+        // Get service location and photo from the cart item data
+        $service_location = '';
+        $service_photo_url = '';
+        
+        // Get the cart item metadata
+        $item_meta = $item->get_meta_data();
+        foreach ( $item_meta as $meta ) {
+            if ( $meta->key === 'Service Location' ) {
+                $service_location = $meta->value;
+            }
+            if ( $meta->key === 'Service Photo' ) {
+                $service_photo_url = $meta->value;
+            }
+        }
+        
+        // Build description including service location AND photo URL link
+        $description = '';
+        
+        // Add service location to description if available
+        if ( ! empty( $service_location ) ) {
+            $description = "Service Location: " . $service_location;
+        }
+        
+        // Add photo link directly in description
+        if ( ! empty( $service_photo_url ) ) {
+            if ( ! empty( $description ) ) {
+                $description .= "\n";
+            }
+            $description .= 'Photo: <a href="' . $service_photo_url . '" target="_blank">View Service Area Photo</a>';
+        }
+        
+        // Add material cost information if present
+        if ( $material_cost > 0 ) {
+            if ( ! empty( $description ) ) {
+                $description .= "\n";
+            }
+            $description .= 'Material cost: $' . number_format( $material_cost, 2 );
+        }
+        
+        // If no custom description, use product description or default
+        if ( empty( $description ) ) {
+            $description = $product->get_description() ?: 'Service from website order';
+        }
+        
+        // For now, don't add photos to line items during creation - we'll do it after
+        $photos_array = [];
         
         // Create separate line items for each quantity (instead of using quantity field)
         for ( $i = 0; $i < $quantity; $i++ ) {
             $line_items[] = [
                 'jnid' => $jn_product['jnid'],
-                // 'description' => $description, // Let JobNimbus auto-set description
-                'photos' => [],
+                'description' => $description,
+                'photos' => $photos_array,
                 'name' => $jn_product['name'],
                 'quantity' => 1, // Always 1 since we're creating separate items
                 'price' => $unit_price,
@@ -2593,6 +3117,7 @@ function hme_jn_find_product_by_name( $product_name ) {
     // We create the product with basic info, and pricing will be set in the line item
     return hme_jn_create_product( $product_name, "Product auto-created from website order", 0, 0 );
 }
+
 
 /* ──────────────────  low-level JobNimbus call  ───────────────────── */
 function hme_jn( $endpoint, $method = 'GET', $body = null ) {

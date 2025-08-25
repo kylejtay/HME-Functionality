@@ -45,8 +45,15 @@ jQuery(function($) {
         bindEvents: function() {
             var self = this;
 
-            // Intercept add to cart buttons
-            $(document).on('click', '.single_add_to_cart_button:not(.disabled)', function(e) {
+            // Handle "Add Service Locations" button click
+            $(document).on('click', '#hme-add-locations-btn', function(e) {
+                e.preventDefault();
+                self.startLocationProcess();
+            });
+
+            // Intercept add to cart buttons - broader selector for better compatibility
+            $(document).on('click', '.single_add_to_cart_button:not(.disabled), button[name="add-to-cart"]:not(.disabled), input[type="submit"][name="add-to-cart"]:not(.disabled)', function(e) {
+                console.log('HME Modal: Add to cart button clicked');
                 e.preventDefault();
                 e.stopPropagation();
                 
@@ -69,6 +76,7 @@ jQuery(function($) {
                 $('#hme-quantity').val(quantity);
 
                 // Show modal
+                console.log('HME Modal: Showing modal for product', productId);
                 self.showModal();
                 
                 return false;
@@ -112,6 +120,47 @@ jQuery(function($) {
             $('body').removeClass('hme-modal-open');
         },
 
+        startLocationProcess: function() {
+            var self = this;
+            
+            // Get pending items from server
+            $.post(hme_cart_params.ajax_url, {
+                action: 'hme_get_pending_items'
+            }, function(response) {
+                if (response.success && response.data.length > 0) {
+                    self.pendingItems = response.data;
+                    self.currentItemIndex = 0;
+                    self.showNextLocationModal();
+                }
+            });
+        },
+
+        showNextLocationModal: function() {
+            var self = this;
+            
+            if (self.currentItemIndex >= self.pendingItems.length) {
+                // All done - reload page to show updated cart
+                window.location.reload();
+                return;
+            }
+            
+            var item = self.pendingItems[self.currentItemIndex];
+            
+            // Update modal title
+            $('#hme-cart-modal .hme-modal-header h3').text('Service Location for Item #' + item.item_number);
+            
+            // Store current item data
+            $('#hme-product-id').val(item.product_id);
+            $('#hme-variation-id').val(item.variation_id);
+            $('#hme-quantity').val(1);
+            
+            // Mark this as a pending item
+            $('#hme-cart-modal-form').data('pending-item-index', self.currentItemIndex);
+            
+            // Show modal
+            self.showModal();
+        },
+
         submitForm: function() {
             var self = this;
             var $form = $('#hme-cart-modal-form');
@@ -152,19 +201,35 @@ jQuery(function($) {
                 contentType: false,
                 success: function(response) {
                     if (response.success) {
-                        // Hide modal
-                        self.hideModal();
+                        // Check if this is part of pending items process
+                        var pendingIndex = $form.data('pending-item-index');
                         
-                        // Trigger cart update
-                        $(document.body).trigger('added_to_cart', [
-                            response.data.fragments, 
-                            response.data.cart_hash, 
-                            $submitBtn
-                        ]);
+                        if (typeof pendingIndex !== 'undefined' && self.pendingItems) {
+                            // Hide modal
+                            self.hideModal();
+                            
+                            // Move to next item
+                            self.currentItemIndex++;
+                            
+                            // Show next modal after a brief delay
+                            setTimeout(function() {
+                                self.showNextLocationModal();
+                            }, 500);
+                        } else {
+                            // Regular add to cart - hide modal and update cart
+                            self.hideModal();
+                            
+                            // Trigger cart update
+                            $(document.body).trigger('added_to_cart', [
+                                response.data.fragments, 
+                                response.data.cart_hash, 
+                                $submitBtn
+                            ]);
 
-                        // Show success message
-                        if (response.data.message) {
-                            self.showNotice(response.data.message, 'success');
+                            // Show success message
+                            if (response.data.message) {
+                                self.showNotice(response.data.message, 'success');
+                            }
                         }
                     } else {
                         self.showNotice(response.data || 'Error adding item to cart', 'error');
