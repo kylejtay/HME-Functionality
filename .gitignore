@@ -1,0 +1,17 @@
+# Debug files
+debug.log
+
+# Claude AI assistant files
+.claude/
+
+# Backup files
+*.backup
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
