@@ -1,8 +1,8 @@
 <?php
 /*
 Plugin Name:     HME-Functionality
-Plugin URI:      https://your-site.com/
-Description:     First item = base credits, extras = extra credits; show credits in shop/cart (with USD in parens); on variable products show min–max credits; revert to pure USD at checkout; material cost line under each cart item.
+Plugin URI:      https://homemaintexperts.com/
+Description:     Custom icon meant to extend WooCommerce for home maintenance experts.
 Version:         1.0
 Author:          Fresh Concept
 Author URI:      https://www.freshconcept.co/
@@ -27,6 +27,11 @@ if ( ! defined( 'FC_CREDIT_RATE' ) ) {
     define( 'FC_CREDIT_RATE', 11.3636363636 );
 }
 
+// 2) Duration rate: 1 credit = 5 minutes
+if ( ! defined( 'HME_CREDIT_TO_MINUTES' ) ) {
+    define( 'HME_CREDIT_TO_MINUTES', 5 );
+}
+
 // Define Stripe Processing Fees
 if ( ! defined( 'HME_STRIPE_CC_PERCENTAGE' ) ) {
     define( 'HME_STRIPE_CC_PERCENTAGE', 0.029 ); // 2.9%
@@ -42,6 +47,64 @@ if ( ! defined( 'HME_STRIPE_ACH_MAX_FEE' ) ) {
 }
 
 // JobNimbus API Key is defined in wp-config.php
+
+/******************************************************************
+ *  DURATION CALCULATION FUNCTIONS
+ *****************************************************************/
+
+/**
+ * Convert credits to duration in minutes
+ * 1 credit = 5 minutes
+ */
+function hme_credits_to_duration( $credits ) {
+    return intval( $credits ) * HME_CREDIT_TO_MINUTES;
+}
+
+/**
+ * Format duration in minutes to human-readable format
+ */
+function hme_format_duration( $minutes ) {
+    if ( $minutes < 60 ) {
+        return $minutes . ' minute' . ( $minutes != 1 ? 's' : '' );
+    }
+    
+    $hours = floor( $minutes / 60 );
+    $remaining_minutes = $minutes % 60;
+    
+    $result = $hours . ' hour' . ( $hours != 1 ? 's' : '' );
+    if ( $remaining_minutes > 0 ) {
+        $result .= ' ' . $remaining_minutes . ' minute' . ( $remaining_minutes != 1 ? 's' : '' );
+    }
+    
+    return $result;
+}
+
+/**
+ * Get total credits from an order
+ */
+function hme_get_order_total_credits( $order ) {
+    $total_credits = 0;
+    
+    foreach ( $order->get_items() as $item ) {
+        $product = $item->get_product();
+        if ( ! $product ) continue;
+        
+        $product_id = $product->is_type('variation') ? $product->get_id() : $product->get_id();
+        $base_credits = intval( get_post_meta( $product_id, 'base credits', true ) );
+        
+        // Fallback: Extract credits from product name if base credits not set
+        if ( $base_credits == 0 ) {
+            $product_name = $product->get_name();
+            if ( preg_match('/\((\d+)\s*credits?\)/i', $product_name, $matches) ) {
+                $base_credits = intval( $matches[1] );
+            }
+        }
+        
+        $total_credits += $base_credits * $item->get_quantity();
+    }
+    
+    return $total_credits;
+}
 
 // Enqueue checkout scripts
 add_action( 'wp_enqueue_scripts', 'hme_checkout_scripts' );
@@ -223,8 +286,8 @@ function hme_add_service_location_fields() {
             $('.hme-photo-status').remove();
             
             console.log('HME: Fields cleared after successful cart addition');
-        });
-        
+        }); 
+      
         // Add validation styling - use delegation for dynamic forms
         $(document).on('blur', '#hme_service_location', function() {
             if ($(this).val().trim()) {
@@ -1800,6 +1863,19 @@ function hme_create_jobnimbus_records( $order_id ) {
     // Skip if already processed
     if ( $order->get_meta( '_hme_jobnimbus_processed' ) ) return;
 
+    // Calculate and store service duration based on credits
+    $total_credits = hme_get_order_total_credits( $order );
+    $duration_minutes = hme_credits_to_duration( $total_credits );
+    $duration_formatted = hme_format_duration( $duration_minutes );
+    
+    // Store duration in order metadata
+    $order->update_meta_data( '_hme_service_duration_minutes', $duration_minutes );
+    $order->update_meta_data( '_hme_service_duration_formatted', $duration_formatted );
+    $order->update_meta_data( '_hme_total_credits', $total_credits );
+    $order->save();
+    
+    error_log( 'HME: Order ' . $order_id . ' - Credits: ' . $total_credits . ', Duration: ' . $duration_formatted );
+
     $billing = $order->get_address( 'billing' );
     
     /* 1️⃣ Create/Find CONTACT using exact Postman structure */
@@ -1831,7 +1907,10 @@ function hme_create_jobnimbus_records( $order_id ) {
         return;
     }
 
-    /* 2️⃣ Create JOB using exact Postman structure */
+    /* 2️⃣ Create JOB using exact Postman structure with staff assignments */
+    $staff_assignments = hme_jn_get_default_service_staff();
+    $staff_owners = hme_jn_get_staff_owners();
+    
     $job_data = [
         'name' => 'Website Order #' . $order_id,
         'record_type_name' => 'Website Order',
@@ -1839,6 +1918,17 @@ function hme_create_jobnimbus_records( $order_id ) {
         'primary' => [ 'id' => $contact['jnid'] ],
         'cf_string_4' => $order_id
     ];
+    
+    // Add staff assignments and owners
+    if ( ! empty( $staff_assignments ) ) {
+        $job_data['assigned'] = $staff_assignments;
+        error_log( 'HME: Adding ' . count( $staff_assignments ) . ' staff members to job assigned field' );
+    }
+    
+    if ( ! empty( $staff_owners ) ) {
+        $job_data['owners'] = $staff_owners;
+        error_log( 'HME: Adding ' . count( $staff_owners ) . ' staff members to job owners field' );
+    }
 
     $job = hme_jn( 'jobs', 'POST', $job_data );
 
@@ -2090,12 +2180,22 @@ function hme_update_jobnimbus_appointment_dates( $order_id, $start_date, $end_da
 
     error_log( 'HME: Updating JobNimbus job ' . $job_id . ' with dates: ' . $date_start . ' to ' . $date_end );
 
-    // Update job dates and status
-    $job_result = hme_jn( "jobs/$job_id", 'PUT', [ 
+    // Update job dates, status, and staff assignments (owners set during creation)
+    $staff_assignments = hme_jn_get_default_service_staff();
+    
+    $job_update_data = [ 
         'date_start' => $date_start,
         'date_end' => $date_end,
         'status_name' => 'Scheduled'
-    ] );
+    ];
+    
+    // Add staff assignments to ensure they're assigned when appointment is scheduled
+    if ( ! empty( $staff_assignments ) ) {
+        $job_update_data['assigned'] = $staff_assignments;
+        error_log( 'HME: Adding staff assignments to job ' . $job_id . ' during appointment update' );
+    }
+    
+    $job_result = hme_jn( "jobs/$job_id", 'PUT', $job_update_data );
 
     if ( ! $job_result ) {
         error_log( 'HME: Failed to update JobNimbus job: ' . $job_id );
@@ -2147,6 +2247,13 @@ function hme_update_jobnimbus_appointment_dates( $order_id, $start_date, $end_da
             $customer_note .= "<u>Appointment</u> \n";
             $customer_note .= $start_formatted . " → " . $end_formatted;
             
+            // Add service duration if available
+            $duration_minutes = $order->get_meta( '_hme_service_duration_minutes' );
+            $duration_formatted = $order->get_meta( '_hme_service_duration_formatted' );
+            if ( $duration_minutes ) {
+                $customer_note .= " \n<u>Duration</u>: " . $duration_formatted;
+            }
+            
             // Build internal note (plain text)
             $internal_note = $customer_name . " \n";
             $internal_note .= $customer_phone . " \n";
@@ -2160,7 +2267,14 @@ function hme_update_jobnimbus_appointment_dates( $order_id, $start_date, $end_da
             $internal_note .= " \n\n";
             $internal_note .= "Appointment: " . $start_formatted . " → " . $end_formatted;
             
-            // Build minimal update payload - ONLY the fields needed
+            // Add duration to internal note
+            if ( $duration_minutes ) {
+                $internal_note .= " \nDuration: " . $duration_formatted;
+            }
+            
+            // Build update payload with staff assignments (owners set during creation)
+            $staff_assignments = hme_jn_get_default_service_staff();
+            
             $update_payload = array(
                 'type' => 'workorder',
                 'merged' => null,
@@ -2170,6 +2284,12 @@ function hme_update_jobnimbus_appointment_dates( $order_id, $start_date, $end_da
                 'date_end' => $date_end,
                 'jnid' => $work_order['jnid']  // Must include jnid to match the URL
             );
+            
+            // Add staff assignments to ensure they're assigned when appointment is scheduled
+            if ( ! empty( $staff_assignments ) ) {
+                $update_payload['assigned'] = $staff_assignments;
+                error_log( 'HME: Adding staff assignments to work order ' . $work_order['jnid'] . ' during appointment update' );
+            }
             
             $work_order_result = hme_jn( "v2/workorders/{$work_order['jnid']}", 'PUT', $update_payload );
             
@@ -2965,8 +3085,11 @@ function hme_create_work_order_with_line_items( $job_id, $order ) {
         return false;
     }
 
-    // Create the work order with embedded line items
+    // Create the work order with embedded line items and staff assignments
     // Using simplified structure that matches working Postman request
+    $staff_assignments = hme_jn_get_default_service_staff();
+    $staff_owners = hme_jn_get_staff_owners();
+    
     $work_order_data = [
         'type' => 'workorder',
         'name' => 'Work Order for Website Order #' . $order->get_id(),
@@ -2980,6 +3103,17 @@ function hme_create_work_order_with_line_items( $job_id, $order ) {
         'description' => 'Services ordered through website order #' . $order->get_id(),
         'items' => $line_items
     ];
+    
+    // Add staff assignments and owners
+    if ( ! empty( $staff_assignments ) ) {
+        $work_order_data['assigned'] = $staff_assignments;
+        error_log( 'HME: Adding ' . count( $staff_assignments ) . ' staff members to work order assigned field' );
+    }
+    
+    if ( ! empty( $staff_owners ) ) {
+        $work_order_data['owners'] = $staff_owners;
+        error_log( 'HME: Adding ' . count( $staff_owners ) . ' staff members to work order owners field' );
+    }
 
     error_log( 'HME: Prepared ' . count( $line_items ) . ' line items for work order' );
     error_log( 'HME: Line items data: ' . wp_json_encode( $line_items ) );
@@ -3024,6 +3158,295 @@ function hme_jn_find_by_external( $entity, $extId ) {
     );
     return $hits['results'][0] ?? null;
 }
+
+/* ──────────────────  helper: find staff by name  ───────────────────── */
+function hme_jn_find_staff_by_name( $staff_name ) {
+    error_log( 'HME: Searching for staff: ' . $staff_name );
+    
+    // Use the correct JobNimbus users endpoint
+    $users_response = hme_jn( 'account/users' );
+    
+    if ( empty( $users_response ) ) {
+        error_log( 'HME: Failed to retrieve users from JobNimbus' );
+        return null;
+    }
+    
+    // The response might be directly an array or have a 'results' key
+    $users = isset( $users_response['results'] ) ? $users_response['results'] : $users_response;
+    
+    if ( ! is_array( $users ) ) {
+        error_log( 'HME: Invalid users response format: ' . wp_json_encode( $users_response ) );
+        return null;
+    }
+    
+    error_log( 'HME: Retrieved ' . count( $users ) . ' users from JobNimbus' );
+    
+    // Search through all users for exact name match
+    foreach ( $users as $user ) {
+        // Check various name fields that might contain the full name
+        $display_name = isset( $user['display_name'] ) ? $user['display_name'] : '';
+        $full_name = isset( $user['name'] ) ? $user['name'] : '';
+        $first_last = '';
+        
+        // Build first_name + last_name combination
+        if ( isset( $user['first_name'] ) && isset( $user['last_name'] ) ) {
+            $first_last = trim( $user['first_name'] . ' ' . $user['last_name'] );
+        }
+        
+        // Check for exact match in any name field
+        if ( strcasecmp( $display_name, $staff_name ) === 0 || 
+             strcasecmp( $full_name, $staff_name ) === 0 || 
+             strcasecmp( $first_last, $staff_name ) === 0 ) {
+            
+            error_log( 'HME: Found exact match for staff: ' . $staff_name . ' (ID: ' . $user['jnid'] . ')' );
+            error_log( 'HME: User data: ' . wp_json_encode( $user ) );
+            return $user;
+        }
+    }
+    
+    // If no exact match, try partial matching
+    $name_parts = explode( ' ', $staff_name );
+    if ( count( $name_parts ) >= 2 ) {
+        $search_first = strtolower( trim( $name_parts[0] ) );
+        $search_last = strtolower( trim( $name_parts[count( $name_parts ) - 1] ) );
+        
+        foreach ( $users as $user ) {
+            $user_first = isset( $user['first_name'] ) ? strtolower( trim( $user['first_name'] ) ) : '';
+            $user_last = isset( $user['last_name'] ) ? strtolower( trim( $user['last_name'] ) ) : '';
+            
+            if ( $user_first === $search_first && $user_last === $search_last ) {
+                error_log( 'HME: Found partial match for staff: ' . $staff_name . ' (' . $user['first_name'] . ' ' . $user['last_name'] . ', ID: ' . $user['jnid'] . ')' );
+                return $user;
+            }
+        }
+    }
+    
+    error_log( 'HME: No staff found for: ' . $staff_name );
+    error_log( 'HME: Available users: ' . wp_json_encode( array_map( function( $u ) {
+        return [
+            'jnid' => $u['jnid'] ?? 'no-id',
+            'display_name' => $u['display_name'] ?? 'no-display-name',
+            'name' => $u['name'] ?? 'no-name',
+            'first_name' => $u['first_name'] ?? 'no-first',
+            'last_name' => $u['last_name'] ?? 'no-last'
+        ];
+    }, array_slice( $users, 0, 5 ) ) ) ); // Log first 5 users for debugging
+    
+    return null;
+}
+
+/* ──────────────────  helper: get default staff for services (hardcoded)  ────── */
+function hme_jn_get_default_service_staff() {
+    // Hardcoded JobNimbus user IDs for reliable assignment
+    // Jimbo Snarr: lbzlfo5rbf0z7cwqgohpdyu
+    // Collins Staples: ldw8frpcn1z8ntxua3o5uja
+    
+    $staff_assignments = [
+        [
+            'id' => 'lbzlfo5rbf0z7cwqgohpdyu', // Jimbo Snarr
+            'type' => 'user'
+        ],
+        [
+            'id' => 'ldw8frpcn1z8ntxua3o5uja', // Collins Staples
+            'type' => 'user'
+        ]
+    ];
+    
+    error_log( 'HME: Using hardcoded staff assignments for Jimbo Snarr and Collins Staples' );
+    error_log( 'HME: Staff assignments: ' . wp_json_encode( $staff_assignments ) );
+    
+    return $staff_assignments;
+}
+
+/* ──────────────────  helper: get staff owners array  ────── */
+function hme_jn_get_staff_owners() {
+    // Format staff for owners array (simpler format)
+    $owners = [
+        [
+            'id' => 'lbzlfo5rbf0z7cwqgohpdyu' // Jimbo Snarr
+        ],
+        [
+            'id' => 'ldw8frpcn1z8ntxua3o5uja' // Collins Staples
+        ]
+    ];
+    
+    error_log( 'HME: Using hardcoded staff owners: ' . wp_json_encode( $owners ) );
+    
+    return $owners;
+}
+
+/* ──────────────────  helper: test staff assignments (for debugging)  ────── */
+function hme_test_staff_lookup() {
+    error_log( 'HME: === TESTING HARDCODED STAFF ASSIGNMENTS ===' );
+    
+    // Test hardcoded staff assignments
+    $assignments = hme_jn_get_default_service_staff();
+    error_log( 'HME: Staff assignments returned: ' . wp_json_encode( $assignments ) );
+    
+    // Verify the IDs are correct
+    $expected_ids = [ 'lbzlfo5rbf0z7cwqgohpdyu', 'ldw8frpcn1z8ntxua3o5uja' ];
+    $actual_ids = array_map( function( $assignment ) {
+        return $assignment['id'];
+    }, $assignments );
+    
+    error_log( 'HME: Expected IDs: ' . wp_json_encode( $expected_ids ) );
+    error_log( 'HME: Actual IDs: ' . wp_json_encode( $actual_ids ) );
+    
+    if ( $expected_ids === $actual_ids ) {
+        error_log( 'HME: ✓ Staff assignment IDs match expected values' );
+    } else {
+        error_log( 'HME: ✗ Staff assignment IDs do not match expected values' );
+    }
+    
+    error_log( 'HME: === END STAFF ASSIGNMENT TEST ===' );
+}
+
+// Uncomment the line below to test staff lookup on next page load
+// add_action( 'init', 'hme_test_staff_lookup' );
+
+/******************************************************************
+ *  HOMEPAGE PRODUCT DISPLAY MODIFICATIONS
+ *****************************************************************/
+
+/**
+ * Remove add to cart functionality from homepage product loops
+ * Forces users to click through to product page
+ */
+function hme_remove_homepage_add_to_cart() {
+    // Only target homepage and front page
+    if ( is_home() || is_front_page() ) {
+        // Remove WooCommerce add to cart button from product loops
+        remove_action( 'woocommerce_after_shop_loop_item', 'woocommerce_template_loop_add_to_cart', 10 );
+        
+        // Remove WoodMart add to cart actions if they exist
+        remove_action( 'woocommerce_after_shop_loop_item', 'woodmart_template_loop_add_to_cart', 10 );
+        
+        // Remove any quick view/add to cart overlays
+        add_filter( 'woodmart_product_loop_add_to_cart', '__return_false' );
+        add_filter( 'woodmart_loop_add_to_cart', '__return_false' );
+        
+        // Remove add to cart from product grid items
+        add_filter( 'woocommerce_loop_add_to_cart_link', '__return_empty_string' );
+        
+        error_log( 'HME: Removed add to cart functionality from homepage product loops' );
+    }
+}
+add_action( 'wp', 'hme_remove_homepage_add_to_cart' );
+
+/**
+ * Remove add to cart from specific product shortcodes/elements on homepage
+ * This targets WoodMart elements like best sellers, featured products, etc.
+ */
+function hme_disable_homepage_product_cart_buttons() {
+    if ( is_home() || is_front_page() ) {
+        // Hook into WoodMart product grid output
+        add_filter( 'woodmart_get_product_html', 'hme_remove_cart_from_product_html', 10, 2 );
+        
+        // Remove quick shop functionality
+        add_filter( 'woodmart_product_loop_quick_shop', '__return_false' );
+        
+        // Remove add to cart buttons from products element
+        add_filter( 'woodmart_products_element_add_to_cart', '__return_false' );
+    }
+}
+add_action( 'wp', 'hme_disable_homepage_product_cart_buttons' );
+
+/**
+ * Remove cart buttons from product HTML output
+ */
+function hme_remove_cart_from_product_html( $output, $element ) {
+    if ( is_home() || is_front_page() ) {
+        // Remove add to cart button HTML
+        $output = preg_replace( '/<div class="[^"]*add-to-cart-loop[^"]*"[^>]*>.*?<\/div>/s', '', $output );
+        $output = preg_replace( '/<a[^>]*class="[^"]*add_to_cart_button[^"]*"[^>]*>.*?<\/a>/s', '', $output );
+        $output = preg_replace( '/<form[^>]*class="[^"]*cart[^"]*"[^>]*>.*?<\/form>/s', '', $output );
+        
+        // Remove quick shop buttons
+        $output = preg_replace( '/<div class="[^"]*quick-shop[^"]*"[^>]*>.*?<\/div>/s', '', $output );
+        
+        // Remove product options/variations forms
+        $output = preg_replace( '/<div class="[^"]*product-variations[^"]*"[^>]*>.*?<\/div>/s', '', $output );
+    }
+    
+    return $output;
+}
+
+/**
+ * CSS to hide any remaining add to cart elements on homepage
+ */
+function hme_hide_homepage_cart_css() {
+    if ( is_home() || is_front_page() ) {
+        ?>
+        <style type="text/css">
+        /* Hide add to cart buttons and forms on homepage */
+        .home .add-to-cart-loop,
+        .home .add_to_cart_button,
+        .home form.cart,
+        .home .quick-shop,
+        .home .product-variations,
+        .home .woodmart-add-btn,
+        .home .single_add_to_cart_button,
+        .home .woodmart-button,
+        .home .product-buttons,
+        .home .woodmart-product-buttons {
+            display: none !important;
+        }
+        
+        /* Ensure product titles are clickable */
+        .home .product-title a,
+        .home .woocommerce-loop-product__title a {
+            pointer-events: all !important;
+        }
+        
+        /* Make entire product item clickable if needed */
+        .home .product-wrapper {
+            cursor: pointer;
+        }
+        </style>
+        <?php
+    }
+}
+add_action( 'wp_head', 'hme_hide_homepage_cart_css' );
+
+/**
+ * Additional WoodMart-specific hooks to disable add to cart on homepage
+ */
+function hme_woodmart_homepage_cart_filters() {
+    if ( is_home() || is_front_page() ) {
+        // Disable WoodMart quick view and add to cart in product grids
+        add_filter( 'woodmart_product_hover_add_to_cart', '__return_false' );
+        add_filter( 'woodmart_show_product_buttons', '__return_false' );
+        add_filter( 'woodmart_product_action_buttons', '__return_false' );
+        
+        // Disable specific WoodMart product elements
+        remove_action( 'woodmart_product_summary_buttons', 'woocommerce_template_single_add_to_cart', 30 );
+        remove_action( 'woodmart_after_shop_loop_item_title', 'woodmart_template_loop_add_to_cart', 10 );
+        
+        // Target WoodMart Products shortcode/element specifically
+        add_filter( 'woodmart_products_shortcode_add_to_cart', '__return_false' );
+        
+        error_log( 'HME: Applied WoodMart-specific homepage cart removal filters' );
+    }
+}
+add_action( 'wp', 'hme_woodmart_homepage_cart_filters' );
+
+/**
+ * Remove add to cart from WoodMart product carousels and sliders on homepage
+ */
+function hme_disable_homepage_product_sliders_cart() {
+    if ( is_home() || is_front_page() ) {
+        // WoodMart product carousel/slider hooks
+        add_filter( 'woodmart_carousel_product_add_to_cart', '__return_false' );
+        add_filter( 'woodmart_product_slider_add_to_cart', '__return_false' );
+        
+        // Best sellers and featured products specifically
+        add_filter( 'woodmart_best_selling_products_add_to_cart', '__return_false' );
+        add_filter( 'woodmart_featured_products_add_to_cart', '__return_false' );
+        
+        error_log( 'HME: Disabled add to cart for product sliders and carousels on homepage' );
+    }
+}
+add_action( 'wp', 'hme_disable_homepage_product_sliders_cart' );
 
 /* ──────────────────  helper: create product in JobNimbus  ───────────────────── */
 function hme_jn_create_product( $name, $description, $price = 0, $cost = 0 ) {
@@ -3256,23 +3679,49 @@ function hme_redirect_to_schedule_page( $order_id ) {
         }
     }
 
-    /* price → minutes */
-    $rate = 75;                                 // $ / hour
-    $minutes = ceil( (float) $order->get_total() / $rate * 60 );
+    /* Get duration from credits (1 credit = 5 minutes) + 10 minute walkthrough */
+    $total_credits = hme_get_order_total_credits( $order );
+    $service_minutes = hme_credits_to_duration( $total_credits );  // Credits * 5
+    $minutes_with_walkthrough = $service_minutes + 10;  // Add 10 minute walkthrough
+    
+    error_log( 'HME: Order ' . $order_id . ' - Total credits: ' . $total_credits . ', Service time: ' . $service_minutes . ' minutes, With walkthrough: ' . $minutes_with_walkthrough . ' minutes' );
 
-    /* minutes → service_id */
-    $service_map = [
-        30  => 1,      // 1 hr   service ID
-        60  => 2,      // 1.5 hr service ID
-        90 => 3,      // 2 hr   service ID
-        120 => 4,
-    ];
-    // choose the closest bracket (or default)
-    $service_id = $service_map[ $minutes ] ?? $service_map[60];
+    /* Build complete duration-to-service_id mapping based on Booknetic table */
+    // Each service_id corresponds to exact duration in Booknetic
+    $service_map = [];
+    for ( $i = 1; $i <= 96; $i++ ) {
+        $duration = $i * 5;  // Service ID 1 = 5m, ID 2 = 10m, etc.
+        $service_map[$duration] = $i;
+    }
+    
+    // Find the exact match for our calculated duration with walkthrough
+    $service_id = 12; // Default to 1 hour (60 minutes) if no match
+    
+    if ( isset( $service_map[$minutes_with_walkthrough] ) ) {
+        // Exact match found
+        $service_id = $service_map[$minutes_with_walkthrough];
+        error_log( 'HME: Exact match - Using service ID ' . $service_id . ' for ' . $minutes_with_walkthrough . ' minutes' );
+    } else {
+        // Find the closest service that's >= our needed duration
+        foreach ( $service_map as $duration => $id ) {
+            if ( $duration >= $minutes_with_walkthrough ) {
+                $service_id = $id;
+                error_log( 'HME: Closest match - Using service ID ' . $service_id . ' (' . $duration . ' minutes) for needed ' . $minutes_with_walkthrough . ' minutes' );
+                break;
+            }
+        }
+    }
+    
+    // If duration exceeds 8 hours (480 minutes), cap at 8 hours
+    if ( $minutes_with_walkthrough > 480 ) {
+        $service_id = 96;  // 8 hours service
+        error_log( 'HME: Duration exceeds 8 hours, capping at service ID 96 (480 minutes)' );
+    }
 
-    /* stash info for middleware if you wish */
-    $order->update_meta_data( '_hme_service_minutes', $minutes );
+    /* Store duration info for middleware and Booknetic */
+    $order->update_meta_data( '_hme_service_minutes', $minutes_with_walkthrough );
     $order->update_meta_data( '_hme_service_id', $service_id );
+    $order->update_meta_data( '_hme_total_credits', $total_credits );
     $order->save();
 
     // Store order ID in session for Booknetic to use
